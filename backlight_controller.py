@@ -55,10 +55,7 @@ class BacklightController:
 
     @staticmethod
     def stop_adjust_thread():
-        if (
-            BacklightController._adjust_thread
-            and BacklightController._adjust_thread.is_alive()
-        ):
+        if BacklightController._adjust_thread and BacklightController._adjust_thread.is_alive():
             BacklightController._adjust_thread.do_run = False
             BacklightController._adjust_thread.join()
 
@@ -66,7 +63,7 @@ class BacklightController:
     def adjust_brightness_thread(
         target_percent, interpolation="linear", steps_per_second=50, target_time=None
     ):
-        t = threading.currentThread()
+        t = threading.current_thread()
         current_brightness = BacklightController._get_current_raw_brightness()
         target_brightness = round(
             BacklightController._get_max_raw_brightness() * target_percent
@@ -98,8 +95,11 @@ class BacklightController:
             time_writing = time.time() - set_start
             if time_per_step > time_writing:
                 time.sleep(time_per_step - time_writing)
-        BacklightController._set_raw_brightness(int(target_brightness))
-        logger.info(f"screen dimmed, took {time.time() - start}")
+        if getattr(t, "do_run", True) is True:
+            BacklightController._set_raw_brightness(int(target_brightness))
+        logger.info(
+            f"screen dimmed to {BacklightController._get_current_raw_brightness()}%, took {time.time() - start}"
+        )
 
     @staticmethod
     def adjust_brightness(

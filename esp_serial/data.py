@@ -5,6 +5,8 @@ import math
 
 from log import MeticulousLogger
 
+from urllib.parse import unquote as urlDecode
+
 logger = MeticulousLogger.getLogger(__name__)
 
 colorSensorRegex = None
@@ -12,7 +14,7 @@ colorSensorRegex = None
 
 def safeFloat(val):
     convert = float(val)
-    if math.isnan(convert):
+    if not math.isfinite(convert):
         return 0
     return convert
 
@@ -96,9 +98,7 @@ class SensorData:
             )
 
         except Exception as e:
-            logger.warning(
-                f"Failed to parse SensorData ({len(args)}): {args}", exc_info=e
-            )
+            logger.warning(f"Failed to parse SensorData ({len(args)}): {args}", exc_info=e)
             return None
         return data
 
@@ -172,6 +172,8 @@ class ESPInfo:
     batchNumber: str = ""
     buildDate: str = ""
     scaleModule: str = ""
+    partialRetraction: float = 45.0
+    autoPurgeAfterShot: bool = False
 
     def from_args(args):
         espPinout = 0
@@ -181,7 +183,32 @@ class ESPInfo:
         except Exception:
             pass
         try:
-            if len(args) >= 8:
+            if len(args) >= 10:
+                info = ESPInfo(
+                    args[0],
+                    espPinout,
+                    float(args[2]),
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    float(args[8]),
+                    args[9].lower() == "true",
+                )
+            elif len(args) >= 9:
+                info = ESPInfo(
+                    args[0],
+                    espPinout,
+                    float(args[2]),
+                    args[3],
+                    args[4],
+                    args[5],
+                    args[6],
+                    args[7],
+                    float(args[8]),
+                )
+            elif len(args) >= 8:
                 info = ESPInfo(
                     args[0],
                     espPinout,
@@ -210,6 +237,8 @@ class ESPInfo:
             self.batchNumber,
             self.buildDate,
             self.scaleModule,
+            str(self.partialRetraction),
+            "true" if self.autoPurgeAfterShot else "false",
         ]
         return args
 
@@ -224,6 +253,8 @@ class ESPInfo:
             "batch_number": self.batchNumber,
             "build_date": self.buildDate,
             "scale_module": self.scaleModule,
+            "partial_retraction": self.partialRetraction,
+            "auto_purge_after_shot": self.autoPurgeAfterShot,
         }
 
 
@@ -330,13 +361,13 @@ class ShotData:
 
     def from_args(args):
         try:
-            s = args[5].strip("\r\n")
+            s = urlDecode(args[5].strip("\r\n"))
             status = s
         except Exception:
             status = None
 
         try:
-            profile = args[6].strip("\r\n")
+            profile = urlDecode(args[6].strip("\r\n"))
         except Exception:
             profile = None
 
@@ -354,12 +385,12 @@ class ShotData:
                 if main_controller_kind == "none":
                     main_controller_kind = None
 
-                main_setpoint = float(args[8].strip("\r\n"))
+                main_setpoint = safeFloat(args[8].strip("\r\n"))
                 aux_controller_kind = args[9].strip("\r\n")
                 if aux_controller_kind == "none":
                     aux_controller_kind = None
 
-                aux_setpoint = float(args[10].strip("\r\n"))
+                aux_setpoint = safeFloat(args[10].strip("\r\n"))
                 is_aux_controller_active = args[11].strip("\r\n") == "true"
                 gravimetric_flow = safe_float_with_nan(args[12])
             except Exception as e:
@@ -511,9 +542,7 @@ class ButtonEventData:
             except ValueError:
                 pass
 
-            event = ButtonEventData(
-                ButtonEventEnum.from_str(args[0]), time_since_last_event
-            )
+            event = ButtonEventData(ButtonEventEnum.from_str(args[0]), time_since_last_event)
         except Exception as e:
             logger.warning(f"Failed to parse EncoderEventData: {args}", exc_info=e)
             return None

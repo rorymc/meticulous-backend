@@ -13,8 +13,11 @@ from bless import (
     GATTCharacteristicProperties,
 )
 from bless.backends.bluezdbus.dbus.advertisement import BlueZLEAdvertisement, Type
-from dbus_next import Variant
+import dbus_next
+from dbus_next import Message, Variant  # type: ignore[attr-defined]
+from dbus_next.aio import MessageBus
 from dbus_next.errors import DBusError
+from dbus_next.service import ServiceInterface, method
 from improv import ImprovProtocol, ImprovState, ImprovUUID
 
 from config import CONFIG_WIFI, WIFI_MODE, WIFI_MODE_AP, MeticulousConfig
@@ -28,6 +31,57 @@ logger = MeticulousLogger.getLogger(__name__)
 # NOTE: Some systems require different synchronization methods.
 if sys.platform in ["darwin", "win32"]:
     raise ValueError("Cannot run on non-linux platforms")
+
+
+AGENT_PATH = "/com/meticulous/ble_agent"
+
+
+class NoInputNoOutputAgent(ServiceInterface):
+    """BlueZ pairing agent that auto-accepts Just Works pairing.
+
+    Without a registered agent, bluetoothd rejects pairing requests with
+    "Pairing not supported", which kills the BLE connection when iOS
+    responds to an Insufficient Authentication error on the Battery
+    Service characteristic.
+    """
+
+    def __init__(self):
+        super().__init__("org.bluez.Agent1")
+
+    @method()
+    def Release(self):
+        logger.info("[BLE Agent] Released")
+
+    @method()
+    def RequestConfirmation(self, device: "o", passkey: "u"):
+        logger.info(f"[BLE Agent] Auto-confirming pairing for {device}")
+
+    @method()
+    def AuthorizeService(self, device: "o", uuid: "s"):
+        logger.info(f"[BLE Agent] Authorizing service {uuid} for {device}")
+
+    @method()
+    def Cancel(self):
+        logger.info("[BLE Agent] Pairing cancelled")
+
+
+async def register_pairing_agent():
+    """Register a NoInputNoOutput pairing agent with BlueZ."""
+    try:
+        bus = await MessageBus(bus_type=dbus_next.BusType.SYSTEM).connect()
+        agent = NoInputNoOutputAgent()
+        bus.export(AGENT_PATH, agent)
+
+        introspection = await bus.introspect("org.bluez", "/org/bluez")
+        proxy = bus.get_proxy_object("org.bluez", "/org/bluez", introspection)
+        agent_manager = proxy.get_interface("org.bluez.AgentManager1")
+
+        await agent_manager.call_register_agent(AGENT_PATH, "KeyboardDisplay")
+        await agent_manager.call_request_default_agent(AGENT_PATH)
+        logger.info("[BLE Agent] Registered NoInputNoOutput pairing agent")
+        return bus  # keep reference alive
+    except Exception as e:
+        logger.warning(f"[BLE Agent] Failed to register pairing agent: {e}")
 
 # FIXME Remove once the tornado server logic is in its own class
 PORT = int(os.getenv("PORT", "8080"))
@@ -243,9 +297,7 @@ class GATTServer:
         # proper sdio power sequencing
         # After boot we need to was 10 or so seconds for the variscite wifi service
         # to enable bluetooth again
-        uptime_missing = round(
-            GATTServer.MIN_BOOT_TIME - (time.time() - psutil.boot_time())
-        )
+        uptime_missing = round(GATTServer.MIN_BOOT_TIME - (time.time() - psutil.boot_time()))
         if uptime_missing > 0:
             logger.info(
                 f"GattServer started to fast after system boot. Waiting {uptime_missing} seconds"
@@ -263,11 +315,24 @@ class GATTServer:
             logger.warning("Could not initialize the BLE gatt interface. Bailing out!")
             return
 
+        if self.bless_gatt_server.app is not None:
+
+            def on_start_notify(char_uuid):
+                logger.info(f"BLE client subscribed to notifications (char={char_uuid})")
+
+            def on_stop_notify(char_uuid):
+                logger.info(f"BLE client unsubscribed from notifications (char={char_uuid})")
+
+            self.bless_gatt_server.app.StartNotify = on_start_notify
+            self.bless_gatt_server.app.StopNotify = on_stop_notify
+
+        # Register a pairing agent so bluetoothd can handle pairing requests
+        # (e.g. when iOS requires authentication for its Battery Service)
+        self._agent_bus = await register_pairing_agent()
+
         # Power on the hci device if it is powered off
         try:
-            interface = self.bless_gatt_server.adapter.get_interface(
-                "org.bluez.Adapter1"
-            )
+            interface = self.bless_gatt_server.adapter.get_interface("org.bluez.Adapter1")
             powered = await interface.get_powered()
             if not powered:
                 logger.info("bluetooth device is not powered, powering now!")
@@ -285,6 +350,58 @@ class GATTServer:
 
         if not success:
             raise RuntimeError("GATT server couldn't be started")
+
+        # Monitor BLE client connect/disconnect via BlueZ DBus signals
+        bus = self.bless_gatt_server.bus
+
+        def _on_dbus_message(msg):
+            if (
+                msg.member == "PropertiesChanged"
+                and msg.interface == "org.freedesktop.DBus.Properties"
+                and len(msg.body) >= 2
+                and msg.body[0] == "org.bluez.Device1"
+            ):
+                changed_props = msg.body[1]
+                if "Connected" in changed_props:
+                    connected = changed_props["Connected"].value
+                    device_path = msg.path
+                    # Try to extract device address and name from changed properties
+                    address = changed_props.get("Address", None)
+                    if address:
+                        address = address.value
+                    name = changed_props.get("Name", None)
+                    if name:
+                        name = name.value
+                    device_info = f"path={device_path}"
+                    if address:
+                        device_info += f", address={address}"
+                    if name:
+                        device_info += f", name={name}"
+                    if connected:
+                        logger.info(f"BLE client connected ({device_info})")
+                    else:
+                        logger.info(f"BLE client disconnected ({device_info})")
+                if "DisconnectReason" in changed_props:
+                    reason = changed_props["DisconnectReason"].value
+                    logger.info(f"BLE disconnect reason: {reason} (path={msg.path})")
+
+        bus.add_message_handler(_on_dbus_message)
+        await bus.call(
+            Message(
+                destination="org.freedesktop.DBus",
+                path="/org/freedesktop/DBus",
+                interface="org.freedesktop.DBus",
+                member="AddMatch",
+                signature="s",
+                body=[
+                    "type='signal',"
+                    "sender='org.bluez',"
+                    "interface='org.freedesktop.DBus.Properties',"
+                    "member='PropertiesChanged',"
+                    "arg0='org.bluez.Device1'"
+                ],
+            )
+        )
 
         try:
             logger.info("GATT Server started")
@@ -307,28 +424,23 @@ class GATTServer:
                 GATTServer.MACHINE_IDENT_UUID: {
                     "Properties": (GATTCharacteristicProperties.read),
                     "Permissions": (
-                        GATTAttributePermissions.readable
-                        | GATTAttributePermissions.writeable
+                        GATTAttributePermissions.readable | GATTAttributePermissions.writeable
                     ),
                 },
                 ImprovUUID.STATUS_UUID.value: {
                     "Properties": (
-                        GATTCharacteristicProperties.read
-                        | GATTCharacteristicProperties.notify
+                        GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify
                     ),
                     "Permissions": (
-                        GATTAttributePermissions.readable
-                        | GATTAttributePermissions.writeable
+                        GATTAttributePermissions.readable | GATTAttributePermissions.writeable
                     ),
                 },
                 ImprovUUID.ERROR_UUID.value: {
                     "Properties": (
-                        GATTCharacteristicProperties.read
-                        | GATTCharacteristicProperties.notify
+                        GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify
                     ),
                     "Permissions": (
-                        GATTAttributePermissions.readable
-                        | GATTAttributePermissions.writeable
+                        GATTAttributePermissions.readable | GATTAttributePermissions.writeable
                     ),
                 },
                 ImprovUUID.RPC_COMMAND_UUID.value: {
@@ -338,14 +450,12 @@ class GATTServer:
                         | GATTCharacteristicProperties.write_without_response
                     ),
                     "Permissions": (
-                        GATTAttributePermissions.readable
-                        | GATTAttributePermissions.writeable
+                        GATTAttributePermissions.readable | GATTAttributePermissions.writeable
                     ),
                 },
                 ImprovUUID.RPC_RESULT_UUID.value: {
                     "Properties": (
-                        GATTCharacteristicProperties.read
-                        | GATTCharacteristicProperties.notify
+                        GATTCharacteristicProperties.read | GATTCharacteristicProperties.notify
                     ),
                     "Permissions": (GATTAttributePermissions.readable),
                 },
@@ -447,44 +557,54 @@ class GATTServer:
         return bytearray(current_response.encode())
 
     def read_request(characteristic: BlessGATTCharacteristic, **kwargs) -> bytearray:
+        char_name = characteristic.uuid
         try:
-            improv_char = ImprovUUID(characteristic.uuid)
-            logger.info(f"Reading {improv_char}")
-        except Exception:
-            logger.info(f"Reading {characteristic.uuid}")
-            pass
+            char_name = ImprovUUID(characteristic.uuid).name
+        except ValueError:
+            if characteristic.uuid == GATTServer.MACHINE_IDENT_UUID:
+                char_name = "MACHINE_IDENT"
+
         if characteristic.service_uuid == ImprovUUID.SERVICE_UUID.value:
             if characteristic.uuid == GATTServer.MACHINE_IDENT_UUID:
                 value = GATTServer.machine_ident_read_request(characteristic)
             else:
                 GATTServer.getServer().updateAuthentication()
-                value = GATTServer.getServer().improv_server.handle_read(
-                    characteristic.uuid
-                )
+                value = GATTServer.getServer().improv_server.handle_read(characteristic.uuid)
+            logger.info(f"BLE READ  {char_name} -> {len(value)} bytes: {value.hex()}")
             return value
 
+        logger.info(f"BLE READ  {char_name} (non-improv)")
         return characteristic.value
 
-    def write_request(
-        characteristic: BlessGATTCharacteristic, value: bytearray, **kwargs
-    ):
+    def write_request(characteristic: BlessGATTCharacteristic, value: bytearray, **kwargs):
+        char_name = characteristic.uuid
+        try:
+            char_name = ImprovUUID(characteristic.uuid).name
+        except ValueError:
+            pass
+
+        logger.info(f"BLE WRITE {char_name} <- {len(value)} bytes: {value.hex()}")
+
         if characteristic.service_uuid == ImprovUUID.SERVICE_UUID.value:
             (
                 target_uuid,
                 target_values,
-            ) = GATTServer.getServer().improv_server.handle_write(
-                characteristic.uuid, value
-            )
+            ) = GATTServer.getServer().improv_server.handle_write(characteristic.uuid, value)
             if target_uuid is not None and target_values is not None:
-                for value in target_values:
-                    logger.debug(f"Setting {ImprovUUID(target_uuid)} to {value}")
+                target_name = target_uuid
+                try:
+                    target_name = ImprovUUID(target_uuid).name
+                except ValueError:
+                    pass
+                for resp_value in target_values:
+                    logger.info(
+                        f"BLE RESP  {target_name} -> {len(resp_value)} bytes: {resp_value.hex()}"
+                    )
                     GATTServer.getServer().bless_gatt_server.get_characteristic(
                         target_uuid,
-                    ).value = value
+                    ).value = resp_value
                     success = GATTServer.getServer().bless_gatt_server.update_value(
                         ImprovUUID.SERVICE_UUID.value, target_uuid
                     )
                     if not success:
-                        logger.warning(
-                            f"Updating characteristic return status={success}"
-                        )
+                        logger.warning(f"Updating characteristic return status={success}")

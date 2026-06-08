@@ -1,8 +1,49 @@
 import json
-from .stages import *
-from .dictionaries_simplified import *
-from config import MeticulousConfig, CONFIG_USER, MACHINE_ALLOW_STAGE_SKIPPING
-
+from .controllers import (
+    FlowController,
+    PositionReferenceController,
+    PowerController,
+    PressureController,
+    TemperatureController,
+    TimeReferenceController,
+    WeightReferenceController,
+)
+from .dictionaries_simplified import interpolation_dict, over_dict
+from .nodes import Nodes
+from .triggers import (
+    ButtonTrigger,
+    ExitTrigger,
+    FlowCurveTrigger,
+    FlowValueTrigger,
+    PistonPositionTrigger,
+    PowerCurveTrigger,
+    PowerValueTrigger,
+    PressureCurveTrigger,
+    PressureValueTrigger,
+    TemperatureCurveTrigger,
+    TemperatureValueTrigger,
+    TimerTrigger,
+    Triggers,
+    WeightTrigger,
+)
+from .enums import (
+    ButtonSourceType,
+    CurveInterpolationType,
+    FlowAlgorithmType,
+    PowerAlgorithmType,
+    PressureAlgorithmType,
+    ReferenceType,
+    SourceType,
+    TemperatureAlgorithmType,
+    TemperatureSourceType,
+    TriggerOperatorType,
+)
+from config import (
+    MeticulousConfig,
+    CONFIG_USER,
+    MACHINE_ALLOW_STAGE_SKIPPING,
+    MAX_PISTON_POSITION,
+)
 
 current_node_id = 1
 current_curve_id = 10000
@@ -57,9 +98,7 @@ class SimplifiedJson:
 
         if comparison_value is None:
             comparison_value = default_comparison
-            print(
-                f"Comparison value is None. Using default value: {default_comparison}."
-            )
+            print(f"Comparison value is None. Using default value: {default_comparison}.")
 
         if comparison_value == ">=":
             comparison = TriggerOperatorType.GREATER_THAN_OR_EQUAL
@@ -67,16 +106,12 @@ class SimplifiedJson:
             comparison = TriggerOperatorType.LESS_THAN_OR_EQUAL
         else:
             comparison = TriggerOperatorType.GREATER_THAN_OR_EQUAL
-            print(
-                f"Comparison: {comparison_value} not supported. Using default value: >= ."
-            )
+            print(f"Comparison: {comparison_value} not supported. Using default value: >= .")
 
         return comparison
 
     def to_complex(self, end_node_head: int, init_node_tail: int):
         global current_node_id
-        global current_curve_id
-        global current_reference_id
 
         allow_skipping = MeticulousConfig[CONFIG_USER][MACHINE_ALLOW_STAGE_SKIPPING]
 
@@ -84,7 +119,6 @@ class SimplifiedJson:
         # Use the comments with * as debugging tools.
         complex_stages = []
         for stage_index, stage in enumerate(self.parameters.get("stages")):
-
             init_node = InitNode(self.get_new_node_id())
             main_node = Nodes(self.get_new_node_id())
 
@@ -212,7 +246,7 @@ class SimplifiedJson:
                         if exits["relative"]:
                             reference_id = init_node.get_time_id()
                         else:
-                            reference_id = 4
+                            reference_id = 1
                         time_comparison = self.set_comparison_type(json_comparison)
                         exit_trigger = TimerTrigger(
                             time_comparison,
@@ -262,14 +296,16 @@ class SimplifiedJson:
                         exit_triggers.append(exit_trigger.get_trigger())
 
                     case "piston_position":
-                        exit_trigger_value = exits["value"]
+                        # Convert percentage (0-100) to position in mm
+                        exit_trigger_value_percent = exits["value"]
+                        exit_trigger_value = (exit_trigger_value_percent / 100) * (
+                            MAX_PISTON_POSITION - 2
+                        )
                         if exits["relative"]:
                             reference_id = init_node.get_position_id()
                         else:
                             reference_id = 0
-                        piston_position_comparison = self.set_comparison_type(
-                            json_comparison
-                        )
+                        piston_position_comparison = self.set_comparison_type(json_comparison)
                         exit_trigger = PistonPositionTrigger(
                             piston_position_comparison,
                             exit_trigger_value,
@@ -290,9 +326,7 @@ class SimplifiedJson:
                         exit_triggers.append(exit_trigger.get_trigger())
 
                     case "temperature":
-                        temperature_comparison = self.set_comparison_type(
-                            json_comparison
-                        )
+                        temperature_comparison = self.set_comparison_type(json_comparison)
                         exit_trigger_value = exits["value"]
                         exit_trigger = TemperatureValueTrigger(
                             TemperatureSourceType.WATER,
@@ -521,9 +555,7 @@ if __name__ == "__main__":
     print(json.dumps(complex_node, indent=2))
 
     points = [[0, 6], [10, 8]]
-    trigger = WeightTrigger(
-        SourceType.AVERAGE, TriggerOperatorType.GREATER_THAN, 10, 12
-    )
+    trigger = WeightTrigger(SourceType.AVERAGE, TriggerOperatorType.GREATER_THAN, 10, 12)
 
     # print(f"Node ID: {main_node.get_node_id()}")
     # print(json.dumps(main_node.get_node(), indent=2))

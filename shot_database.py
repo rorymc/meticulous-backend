@@ -29,12 +29,14 @@ from sqlalchemy import update
 from database_models import metadata, profile as profile_table, history as history_table
 from database_models import shot_annotation, shot_rating
 
-from log import MeticulousLogger
+from config import (
+    HISTORY_PATH,
+    ABSOLUTE_DATABASE_FILE,
+    DATABASE_URL,
+    SHOT_PATH,
+)
 
-HISTORY_PATH = os.getenv("HISTORY_PATH", "/meticulous-user/history")
-DATABASE_FILE = "history.sqlite"
-ABSOLUTE_DATABASE_FILE = Path(HISTORY_PATH).joinpath(DATABASE_FILE).resolve()
-DATABASE_URL = f"sqlite:///{ABSOLUTE_DATABASE_FILE}"
+from log import MeticulousLogger
 
 logger = MeticulousLogger.getLogger(__name__)
 
@@ -139,8 +141,8 @@ class ShotDataBase:
             ShotDataBase.engine.dispose()
 
             # Delete the database file
-            if os.path.exists(DATABASE_FILE):
-                os.remove(DATABASE_FILE)
+            if os.path.exists(ABSOLUTE_DATABASE_FILE):
+                os.remove(ABSOLUTE_DATABASE_FILE)
                 logger.info("Database file deleted successfully.")
 
             # Recreate the entire database
@@ -155,7 +157,7 @@ class ShotDataBase:
         stages_json = json.dumps(profile_data.get("stages", []))
         variables_json = json.dumps(profile_data.get("variables", []))
         previous_authors_json = json.dumps(profile_data.get("previous_authors", []))
-        display_json = json.dumps(profile_data.get("previous_authors", []))
+        display_json = json.dumps(profile_data.get("display", {}))
 
         query = (
             select(profile_table.c.key)
@@ -302,33 +304,21 @@ class ShotDataBase:
                 if result.rowcount == 0:
                     logger.warning("no columns affected, check relative file path")
                 else:
-                    logger.info(
-                        f"debug file linked, affected rows: {{{result.rowcount}}}"
-                    )
+                    logger.info(f"debug file linked, affected rows: {{{result.rowcount}}}")
 
     @staticmethod
     def delete_shot(shot_id):
         with ShotDataBase.engine.connect() as connection:
             with connection.begin():
                 # Delete from history
-                del_stmt = delete(ShotDataBase.history_table).where(
-                    history_table.c.id == shot_id
-                )
+                del_stmt = delete(history_table).where(history_table.c.id == shot_id)
                 connection.execute(del_stmt)
 
-                # Get the profile_key of the deleted shot
-                profile_key_stmt = select(
-                    [ShotDataBase.history_table.c.profile_key]
-                ).where(history_table.c.id == shot_id)
-                connection.execute(profile_key_stmt).fetchone()
-
                 # Check for orphaned profiles
-                orphaned_profiles_stmt = select([profile_table.c.key]).where(
-                    ~profile_table.c.key.in_(select([history_table.c.profile_key]))
+                orphaned_profiles_stmt = select(profile_table.c.key).where(
+                    ~profile_table.c.key.in_(select(history_table.c.profile_key))
                 )
-                orphaned_profiles = connection.execute(
-                    orphaned_profiles_stmt
-                ).fetchall()
+                orphaned_profiles = connection.execute(orphaned_profiles_stmt).fetchall()
                 for orphan in orphaned_profiles:
                     del_profile_stmt = delete(profile_table).where(
                         profile_table.c.key == orphan[0]
@@ -337,7 +327,7 @@ class ShotDataBase:
 
                     # Delete from profile_fts
                     del_profile_fts_stmt = delete(ShotDataBase.profile_fts_table).where(
-                        ShotDataBase.profile_fts_table.c.key == orphan[0]
+                        ShotDataBase.profile_fts_table.c.profile_key == orphan[0]
                     )
                     connection.execute(del_profile_fts_stmt)
 
@@ -424,16 +414,23 @@ class ShotDataBase:
                 file_entry = row_dict.pop("history_file")
 
                 if params.dump_data:
-                    from shot_manager import SHOT_PATH
-
                     data_file = Path(SHOT_PATH).joinpath(file_entry)
-                    with open(data_file, "rb") as compressed_file:
-                        decompressor = zstd.ZstdDecompressor()
-                        decompressed_content = decompressor.stream_reader(
-                            compressed_file
-                        )
-                        file_contents = json.loads(decompressed_content.read())
-                        data = file_contents.get("data")
+                    try:
+                        with open(data_file, "rb") as compressed_file:
+                            decompressor = zstd.ZstdDecompressor()
+                            decompressed_content = decompressor.stream_reader(compressed_file)
+                            raw = decompressed_content.read()
+                            if b": Infinity" in raw or b": NaN" in raw:
+                                logger.warning(
+                                    f"Patching non-finite JSON token in shot file: {file_entry}"
+                                )
+                                raw = raw.replace(b": Infinity", b": 0.0")
+                                raw = raw.replace(b": NaN", b": 0.0")
+                            file_contents = json.loads(raw)
+                            data = file_contents.get("data")
+                    except Exception as e:
+                        logger.error(f"Failed to read shot file {file_entry}: {e}")
+                        continue
 
                 profile = {
                     "id": row_dict.pop("profile_id"),
@@ -497,9 +494,7 @@ class ShotDataBase:
             profile_results = session.execute(stmt_profile).fetchall()
             stage_results = session.execute(stmt_stage).fetchall()
 
-            results = [
-                {"profile": res.name, "type": "profile"} for res in profile_results
-            ]
+            results = [{"profile": res.name, "type": "profile"} for res in profile_results]
             for result in stage_results:
                 results.append(
                     {
@@ -518,9 +513,7 @@ class ShotDataBase:
                 select(
                     history_table.c.profile_name.label("profile_name"),
                     func.count(history_table.c.profile_name).label("profile_count"),
-                    func.count(distinct(history_table.c.profile_id)).label(
-                        "profile_versions"
-                    ),
+                    func.count(distinct(history_table.c.profile_id)).label("profile_versions"),
                 )
                 .group_by(
                     history_table.c.profile_name,
@@ -546,9 +539,7 @@ class ShotDataBase:
     def rate_shot(history_uuid: str, rating: Optional[str]) -> bool:
 
         if rating not in ("like", "dislike", None):
-            logger.error(
-                f"Invalid rating: {rating}. Must be 'like', 'dislike', or None."
-            )
+            logger.error(f"Invalid rating: {rating}. Must be 'like', 'dislike', or None.")
             return False
 
         try:
@@ -556,9 +547,7 @@ class ShotDataBase:
                 with connection.begin():
 
                     shot_exists = connection.execute(
-                        select(history_table.c.id).where(
-                            history_table.c.uuid == history_uuid
-                        )
+                        select(history_table.c.id).where(history_table.c.uuid == history_uuid)
                     ).fetchone()
 
                     if not shot_exists:

@@ -25,6 +25,8 @@ from config import (
     MACHINE_BUILD_DATE,
     MACHINE_BATCH_NUMBER,
     MACHINE_HEAT_ON_BOOT,
+    PROFILE_AUTO_PURGE,
+    PROFILE_PARTIAL_RETRACTION,
     MeticulousConfig,
 )
 from esp_serial.connection.emulator_serial_connection import EmulatorSerialConnection
@@ -46,8 +48,26 @@ from notifications import Notification, NotificationManager, NotificationRespons
 from shot_debug_manager import ShotDebugManager
 from shot_manager import ShotManager
 from sounds import SoundPlayer, Sounds
+from api.alarms import AlarmManager, AlarmType
+from images.notificationImages.base64 import WARNING_TRIANGLE_IMAGE
+import math
+
+from sentry_sdk.integrations.asyncio import AsyncioIntegration
+
 
 from manufacturing import FORCE_MANUFACTURING_ENABLED_KEY, LAST_BOOT_MODE_KEY
+
+ESPSentryClient = sentry_sdk.Client(
+    dsn="https://ae0d66689e4445a4af7de61ab576d17c@sentry.meticulousespresso.com/6",
+    traces_sample_rate=0.0,
+    # Set profiles_sample_rate to 1.0 to profile 100%
+    # of sampled transactions.
+    # We recommend adjusting this value in production.
+    profiles_sample_rate=0.0,
+    integrations=[
+        AsyncioIntegration(),
+    ],
+)
 
 
 def toggle_sentry(enabled):
@@ -76,6 +96,8 @@ class esp_nvs_keys(Enum):
     serial_number = "serial_number_key"
     batch_number = "batch_number_key"
     build_date = "build_date_key"
+    partial_retraction = "partial_retraction_key"
+    auto_purge_after_shot = "auto_purge_after_shot_key"
 
 
 class Machine:
@@ -128,6 +150,8 @@ class Machine:
     stable_time_threshold = 2.0
 
     aborted_by_motor_consumtion = False
+
+    esp_restart_request = False
 
     @staticmethod
     def get_somrev():
@@ -184,8 +208,7 @@ class Machine:
         ):
             # if we are not in manufacturing mode, check if we were in the previous boot
             Machine.is_first_normal_boot = (
-                MeticulousConfig[CONFIG_MANUFACTURING][LAST_BOOT_MODE_KEY]
-                == "manufacturing"
+                MeticulousConfig[CONFIG_MANUFACTURING][LAST_BOOT_MODE_KEY] == "manufacturing"
             )
             return
 
@@ -199,9 +222,7 @@ class Machine:
     def check_machine_alive():
         if not Machine.infoReady:
             if MeticulousConfig[CONFIG_USER][DISALLOW_FIRMWARE_FLASHING]:
-                logger.warning(
-                    "The ESP never send an info, but user requested no updates!"
-                )
+                logger.warning("The ESP never send an info, but user requested no updates!")
             else:
                 logger.warning(
                     "The ESP never send an info, flashing latest firmware to be sure"
@@ -210,11 +231,17 @@ class Machine:
         else:
             logger.info("The ESP is alive")
 
-    def init(sio):
-        Machine._sio = sio
+    def refreshAvailableFirmware():
         Machine.firmware_available = Machine._parseVersionString(
             ESPToolWrapper.get_version_from_firmware()
         )
+        logger.info(f"Backend available firmware version: {Machine.firmware_available}")
+        return Machine.firmware_available
+
+    def init(sio):
+        Machine.esp_restart_request = True
+        Machine._sio = sio
+        Machine.refreshAvailableFirmware()
 
         # If we dont have a serial we still want to be able to show ... something
         serial = MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER]
@@ -270,13 +297,15 @@ class Machine:
             self.buf = bytearray()
             self.s = s
 
-        def readline(self):
+        def readline(self, timeout=None):
             i = self.buf.find(b"\n")
             if i >= 0:
                 r = self.buf[: i + 1]
                 self.buf = self.buf[i + 1 :]
                 return r
+            start_time = time.monotonic()
             while not Machine._stopESPcomm:
+                now = time.monotonic()
                 i = max(1, min(2048, self.s.in_waiting))
                 data = self.s.read(i)
                 i = data.find(b"\n")
@@ -286,6 +315,9 @@ class Machine:
                     return r
                 else:
                     self.buf.extend(data)
+                if timeout is not None and now - start_time > timeout:
+                    logger.warning("timeout on readline")
+                    return None
             return self.buf
 
     async def _read_data():  # noqa: C901
@@ -302,6 +334,9 @@ class Machine:
         profile_time = 0
         emulated_firmware = False
         previous_preheat_remaining = None
+        ESP_tracing_info = []
+        collect_tracing_info = False
+        previous_valid_message_timestamp = time.monotonic()
 
         logger.info("Starting to listen for esp32 messages")
         Machine.startTime = time.time()
@@ -311,13 +346,13 @@ class Machine:
                 Machine.startTime = time.time()
                 continue
 
-            data = uart.readline()
-            if len(data) > 0:
+            data_bytes = uart.readline(timeout=0.5)
+            if data_bytes is not None and len(data_bytes) > 0:
                 # data_bit = bytes(data)
                 try:
-                    data_str = data.decode("utf-8")
+                    data_str = data_bytes.decode("utf-8")
                 except Exception:
-                    logger.info(f"decoding fails, message: {data}")
+                    logger.info(f"decoding fails, message: {data_bytes}")
                     continue
 
                 if MeticulousConfig[CONFIG_LOGGING][LOGGING_SENSOR_MESSAGES]:
@@ -331,10 +366,11 @@ class Machine:
                 data = None
                 info = None
                 notify = None
+                is_valid_message = True
 
-                if (
-                    data_str.startswith("rst:0x")
-                    and "boot:0x16 (SPI_FAST_FLASH_BOOT)" in data_str
+                if data_str.startswith("rst:0x") and all(
+                    boot_check in data_str
+                    for boot_check in ["boot:0x", " (SPI_FAST_FLASH_BOOT)"]
                 ):
                     Machine.reset_count += 1
                     Machine.startTime = time.time()
@@ -342,17 +378,28 @@ class Machine:
                     info_requested = False
                     Machine.infoReady = False
                     Machine.profileReady = False
+                    is_valid_message = False
+                    collect_tracing_info = False
 
                 if Machine.reset_count >= 3:
                     logger.warning("The ESP seems to be resetting, sending update now")
                     Machine.startUpdate()
                     Machine.reset_count = 0
 
-                if (
-                    Machine.infoReady
-                    and not info_requested
-                    and Machine.esp_info is None
+                if any(
+                    crash_check in data_str.lower()
+                    for crash_check in [
+                        "backtrace",
+                        "guru meditation error",
+                        "register dump",
+                    ]
                 ):
+                    collect_tracing_info = True
+
+                if collect_tracing_info:
+                    ESP_tracing_info.append(data_str)
+
+                if Machine.infoReady and not info_requested and Machine.esp_info is None:
                     logger.info(
                         "Machine has not provided us with a firmware version yet. Requesting now"
                     )
@@ -363,14 +410,7 @@ class Machine:
                     # FIXME: This should be replace in the firmware with an "Event," prefix
                     # for cleanliness
                     case [
-                        "CCW"
-                        | "CW"
-                        | "push"
-                        | "pu_d"
-                        | "elng"
-                        | "ta_d"
-                        | "ta_l"
-                        | "strt"
+                        "CCW" | "CW" | "push" | "pu_d" | "elng" | "ta_d" | "ta_l" | "strt"
                     ] as ev:
                         button_event = ButtonEventData.from_args(ev)
                     case ["Event", *eventData]:
@@ -390,9 +430,7 @@ class Machine:
 
                     case ["HeaterTimeoutInfo", *timeoutArgs]:
                         try:
-                            heater_timeout_info = HeaterTimeoutInfo.from_args(
-                                timeoutArgs
-                            )
+                            heater_timeout_info = HeaterTimeoutInfo.from_args(timeoutArgs)
                             Machine.heater_timeout_info = heater_timeout_info
                             await Machine._sio.emit(
                                 "heater_status", heater_timeout_info.preheat_remaining
@@ -402,17 +440,76 @@ class Machine:
                                 and previous_preheat_remaining != 0
                             ):
                                 logger.info("Heater_status: off")
-                            previous_preheat_remaining = (
-                                heater_timeout_info.preheat_remaining
-                            )
+                            previous_preheat_remaining = heater_timeout_info.preheat_remaining
 
                         except Exception as e:
                             logger.error(
                                 f"Error processing HeaterTimeoutInfo: {e}",
                                 exc_info=True,
                             )
+                    case ["Log", *log_data]:
+
+                        def get_log_items(log_data: list[str]):
+                            for data_str in log_data[2:]:
+                                # data in the form: <key>=<value>
+                                data = data_str.split("=")
+                                if len(data) < 2:
+                                    logger.warning(f"Error parsing ESP log item: {data_str}")
+                                    continue
+                                key = data[0]
+                                value = data[1]
+                                items.setdefault(key, value)
+
+                        # logger.info(data_str.strip("\r\n"))
+                        try:
+                            log_level = log_data[0].lower()
+                            message = log_data[1]
+                            full_message = ",".join(log_data[1:])
+                            items: dict[str, str] = {}
+                            send_to_sentry = False
+
+                            match log_level:
+
+                                case "debug":
+                                    logger.debug(full_message)
+                                case "info":
+                                    logger.info(full_message)
+                                case "warning":
+                                    logger.warning(full_message)
+                                case "error":
+                                    logger.error(
+                                        f"ESP error: {full_message}"
+                                    )  # Sends the error to the backend project in sentry
+                            items_filtered = None
+                            if len(log_data) > 2:
+                                get_log_items(log_data=log_data)
+                                send_to_sentry = items.get("sentry", "false") == "true"
+                                items_filtered = {
+                                    k: v for k, v in items.items() if k != "sentry"
+                                }
+
+                            send_to_sentry = send_to_sentry or log_level == "error"
+
+                            if send_to_sentry:
+                                with sentry_sdk.new_scope() as scope:
+                                    if items_filtered is not None:
+                                        scope.set_context("esp-data", items_filtered)
+                                    scope.set_client(ESPSentryClient)
+                                    if log_level == "error":
+                                        logger.error(full_message)
+                                    else:
+                                        scope.capture_message(
+                                            message=message,
+                                            level=log_level,
+                                        )
+                        except Exception as e:
+                            logger.error(
+                                f"Error '{e}' processing Log from ESP: 'Log,{','.join(log_data)}'",
+                                exc_info=True,
+                            )
                     case [*_]:
                         logger.info(data_str.strip("\r\n"))
+                        is_valid_message = False
 
                 old_ready = Machine.infoReady
 
@@ -499,65 +596,43 @@ class Machine:
                         Machine.data_sensors = data.clone_with_time_and_state(
                             time_passed, True, profile_time
                         )
-                        ShotManager.handleShotData(Machine.data_sensors)
 
                     else:
                         Machine.data_sensors = data.clone_with_time_and_state(
                             time_passed, False, profile_time
                         )
 
-                    ShotDebugManager.handleShotData(Machine.data_sensors)
                     old_status = Machine.data_sensors.status
                     Machine.infoReady = True
 
                 if sensor is not None:
 
-                    def stopMotorIfHot(_sensorData: SensorData):
-                        MAX_ENERGY_ALLOWED = 12000
-                        energy_consumed_by_motor = (
-                            motor_energy_calculator.calculate_motor_energy(
-                                _sensorData, Machine.data_sensors
-                            )
-                        )
-
-                        def clearMotorAbortFlag():
-                            Machine.aborted_by_motor_consumtion = False
-
-                        if energy_consumed_by_motor >= MAX_ENERGY_ALLOWED:
-                            if not Machine.aborted_by_motor_consumtion:
-                                Machine.aborted_by_motor_consumtion = True
-                                logger.warning(
-                                    f"Motor might be hot, has consumed {energy_consumed_by_motor:.2f}. Stopping profile"
-                                )
-                                motorHotNotification = Notification(
-                                    "Brewing paused because of high strain in the motor. Let the machine rest for 5 min and use a coarser grind before trying again",
-                                    callback=clearMotorAbortFlag,
-                                )
-                                motorHotNotification.respone_options = [
-                                    NotificationResponse.OK
-                                ]
-                                NotificationManager.add_notification(
-                                    motorHotNotification
-                                )
-                                if Machine.data_sensors.status != MachineStatus.IDLE:
-                                    Machine.end_profile()
-                                    Machine.action("home")
-
                     Machine.sensor_sensors = sensor
-                    Machine.reset_count = 0
+                    # Analyze / save data for analysis only when the sensor data is received
+                    # ESP sends first "Data" data followed by "Sensors" data, so, by this time, the
+                    # Machine.data_sensors must be up to date
+
+                    Machine.stopMotorIfHot(Machine.data_sensors, Machine.sensor_sensors)
                     ShotDebugManager.handleSensorData(Machine.sensor_sensors)
+                    ShotDebugManager.handleShotData(Machine.data_sensors)
                     if time_flag:
                         ShotManager.handleSensorData(Machine.sensor_sensors)
-                    stopMotorIfHot(Machine.sensor_sensors)
+                        ShotManager.handleShotData(Machine.data_sensors)
 
                 if info is not None:
                     Machine.esp_info = info
-                    Machine.reset_count = 0
                     Machine.infoReady = True
                     info_requested = False
-                    Machine.firmware_running = Machine._parseVersionString(
-                        info.firmwareV
+                    Machine.firmware_running = Machine._parseVersionString(info.firmwareV)
+
+                    backend_partial_retraction = float(
+                        MeticulousConfig[CONFIG_USER][PROFILE_PARTIAL_RETRACTION]
                     )
+                    Machine.setPartialRetraction(backend_partial_retraction)
+                    backend_auto_purge = bool(
+                        MeticulousConfig[CONFIG_USER][PROFILE_AUTO_PURGE]
+                    )
+                    Machine.setAutoPurgeAfterShot(backend_auto_purge)
 
                     if (
                         info.serialNumber != ""
@@ -573,19 +648,14 @@ class Machine:
                             MACHINE_SERIAL_NUMBER
                         ] = info.serialNumber
                         MeticulousConfig[CONFIG_SYSTEM][MACHINE_COLOR] = info.color
-                        MeticulousConfig[CONFIG_SYSTEM][
-                            MACHINE_BATCH_NUMBER
-                        ] = info.batchNumber
-                        MeticulousConfig[CONFIG_SYSTEM][
-                            MACHINE_BUILD_DATE
-                        ] = info.buildDate
+                        MeticulousConfig[CONFIG_SYSTEM][MACHINE_BATCH_NUMBER] = info.batchNumber
+                        MeticulousConfig[CONFIG_SYSTEM][MACHINE_BUILD_DATE] = info.buildDate
 
                         MeticulousConfig.save()
 
                     # Enable / Disable manufacturing mode based on ESP answer
                     serial_assigned = (
-                        MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER]
-                        is not None
+                        MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER] is not None
                     )
                     if Machine.enable_manufacturing != serial_assigned:
                         if not MeticulousConfig[CONFIG_MANUFACTURING][
@@ -608,9 +678,7 @@ class Machine:
 
                     if (
                         needs_update
-                        and not MeticulousConfig[CONFIG_USER][
-                            DISALLOW_FIRMWARE_FLASHING
-                        ]
+                        and not MeticulousConfig[CONFIG_USER][DISALLOW_FIRMWARE_FLASHING]
                     ):
                         info_string = f"Firmware {Machine.firmware_running.get('Release')}-{Machine.firmware_running['ExtraCommits']} is outdated, upgrading"
                         logger.info(info_string)
@@ -620,8 +688,7 @@ class Machine:
                 if button_event is not None:
                     if (
                         button_event.event is not ButtonEventEnum.ENCODER_CLOCKWISE
-                        and button_event.event
-                        is not ButtonEventEnum.ENCODER_COUNTERCLOCKWISE
+                        and button_event.event is not ButtonEventEnum.ENCODER_COUNTERCLOCKWISE
                     ):
                         logger.debug(f"Button Event recieved: {button_event}")
 
@@ -651,9 +718,7 @@ class Machine:
                     else:
                         responseOptions = [NotificationResponse.OK]
                     if Machine._espNotification.acknowledged:
-                        Machine._espNotification = Notification(
-                            notify.message, responseOptions
-                        )
+                        Machine._espNotification = Notification(notify.message, responseOptions)
                     else:
                         Machine._espNotification.message = notify.message
                         Machine._espNotification.respone_options = responseOptions
@@ -662,12 +727,78 @@ class Machine:
                     )
                     NotificationManager.add_notification(Machine._espNotification)
 
+            # healthcheck:
+            # Notify Sentry if
+            # ESP has not sent a valid message in the last 500ms
+            # ESP has rebooted (append backtrace if there is one)
+            #
+            # - NOTE: If the ESP is rebooting, it will not send messages within those 500ms
+            #         So after a reboot we disable this timeout check and re-enable it once
+            #         it starts sending valid messages
+            #
+            # Notify user if
+            # ESP has rebooted
+
+            now = time.monotonic()
+
+            if data_bytes is not None and is_valid_message:
+                previous_valid_message_timestamp = now
+                if Machine.esp_restart_request:
+                    logger.debug("clearing Machine.esp_restart_request flag")
+                Machine.esp_restart_request = False
+                Machine.reset_count = 0
+                AlarmManager.clear_alarm(AlarmType.ESP_DISCONNECTED)
+                AlarmManager.clear_alarm(AlarmType.ESP_RESTART)
+
+            if Machine.reset_count > 0 and not Machine.esp_restart_request:
+                if AlarmManager.is_alarm_set(AlarmType.ESP_RESTART) is None:
+                    # notify sentry
+                    with sentry_sdk.new_scope() as scope:
+                        if len(ESP_tracing_info) > 0:
+                            tracing_info = "\n".join(ESP_tracing_info)
+                            scope.set_extra("Tracing Info", tracing_info)
+                        sentry_sdk.capture_message("ESP has restarted unexpectedly", "critical")
+                    AlarmManager.set_alarm(
+                        AlarmType.ESP_RESTART, end_time=None, force=False, quiet=True
+                    )
+                    ESP_tracing_info = []
+
+            if now - previous_valid_message_timestamp > 0.5 and not Machine.esp_restart_request:
+                if AlarmManager.is_alarm_set(AlarmType.ESP_DISCONNECTED) is None:
+                    # notify sentry
+                    sentry_sdk.capture_message("ESP has stopped communicating", "error")
+                    AlarmManager.set_alarm(
+                        AlarmType.ESP_DISCONNECTED,
+                        end_time=None,
+                        force=True,
+                        quiet=True,
+                    )
+
+    def stopMotorIfHot(_shotData: ShotData, _sensorData: SensorData):
+        from monitoring.motor_power_monitoring import MAX_ENERGY_ALLOWED
+
+        energy_consumed_by_motor = motor_energy_calculator.calculate_motor_energy(
+            _sensorData, _shotData
+        )
+
+        if energy_consumed_by_motor >= MAX_ENERGY_ALLOWED:
+            if AlarmManager.is_alarm_set(AlarmType.MOTOR_STRESSED) is None:
+                AlarmManager.set_alarm(
+                    AlarmType.MOTOR_STRESSED,
+                    time.time() + 60 * 10,
+                    force=True,
+                )
+                if Machine.data_sensors.status != MachineStatus.IDLE:
+                    Machine.end_profile()
+                    Machine.action("home")
+
     def startScaleMasterCalibration():
         Machine.action("scale_master_calibration")
 
     def startUpdate():
 
         Machine._stopESPcomm = True
+        Machine.esp_restart_request = True
         error_msg = Machine._connection.sendUpdate()
         Machine._stopESPcomm = False
 
@@ -683,22 +814,28 @@ class Machine:
         if Machine.data_sensors.status == "idle":
             return
         logger.info("Ending profile due to user request")
-        if (
-            Machine.data_sensors.state == "brewing"
-            and Machine.data_sensors.status
-            not in [
-                "heating",
-                "Pour water and click to continue",
-                "click to start",
-                "purge",
-            ]
-        ):
+        if Machine.data_sensors.state == "brewing" and Machine.data_sensors.status not in [
+            "heating",
+            "Pour water and click to continue",
+            "click to start",
+            "purge",
+        ]:
             Machine.action("home")
         else:
             Machine.action("stop")
         SoundPlayer.play_event_sound(Sounds.ABORT)
 
     def action(action_event) -> bool:
+        alarm_set = AlarmManager.is_alarm_set(AlarmType.MOTOR_STRESSED)
+        refuse_action = action_event == "purge" and alarm_set is not None
+        if refuse_action:
+            logger.error(f"refusing action {action_event}, there is an alarm up")
+            AlarmManager._notify_user(
+                message=f"Brewing has been disabled because of a recent high strain on the motor, let it rest for {math.ceil((alarm_set - time.time())/60.0) if math.isfinite(alarm_set) else 10} more minutes",
+                image=WARNING_TRIANGLE_IMAGE,
+            )
+            return False
+
         logger.info(f"sending action,{action_event}")
         if action_event == "start" and not Machine.profileReady:
             logger.warning("No profile loaded, sending last loaded profile to esp32")
@@ -726,6 +863,7 @@ class Machine:
             Machine._connection.port.write(content)
 
     def reset():
+        Machine.esp_restart_request = True
         Machine._connection.reset()
         Machine.infoReady = False
         Machine.profileReady = False
@@ -764,32 +902,22 @@ class Machine:
     def setSerial(color, serial, batch_number, build_date):
         write_request = "nvs_request,write,"
         Machine.write(
-            (write_request + esp_nvs_keys.color.value + "," + color + "\x03").encode(
+            (write_request + esp_nvs_keys.color.value + "," + color + "\x03").encode("utf-8")
+        )
+        Machine.write(
+            (write_request + esp_nvs_keys.serial_number.value + "," + serial + "\x03").encode(
                 "utf-8"
             )
         )
         Machine.write(
             (
-                write_request + esp_nvs_keys.serial_number.value + "," + serial + "\x03"
+                write_request + esp_nvs_keys.batch_number.value + "," + batch_number + "\x03"
             ).encode("utf-8")
         )
         Machine.write(
-            (
-                write_request
-                + esp_nvs_keys.batch_number.value
-                + ","
-                + batch_number
-                + "\x03"
-            ).encode("utf-8")
-        )
-        Machine.write(
-            (
-                write_request
-                + esp_nvs_keys.build_date.value
-                + ","
-                + build_date
-                + "\x03"
-            ).encode("utf-8")
+            (write_request + esp_nvs_keys.build_date.value + "," + build_date + "\x03").encode(
+                "utf-8"
+            )
         )
 
         serialNotification = Notification(
@@ -809,6 +937,75 @@ Build Date: {build_date}
 
         MeticulousConfig.save()
         # TODO FIXME IMPLEMENT THIS!!!!
+
+    def setPartialRetraction(partial_retraction: float):
+        desired_value = float(partial_retraction)
+
+        if (
+            Machine.esp_info is not None
+            and Machine.esp_info.partialRetraction is not None
+            and math.isfinite(Machine.esp_info.partialRetraction)
+            and abs(Machine.esp_info.partialRetraction - desired_value) <= 1e-6
+        ):
+            return
+
+        if (
+            Machine._connection is None
+            or Machine._connection.port is None
+            or Machine._stopESPcomm
+        ):
+            logger.warning(
+                "Cannot sync partial_retraction to ESP32 because serial connection is not ready"
+            )
+            return
+
+        write_request = "nvs_request,write,"
+        payload = (
+            write_request
+            + esp_nvs_keys.partial_retraction.value
+            + ","
+            + str(desired_value)
+            + "\x03"
+        )
+        Machine.write(payload.encode("utf-8"))
+        logger.info("Synced partial_retraction to ESP32: " + f"requested={desired_value:.2f}")
+
+        if Machine.esp_info is not None:
+            Machine.esp_info.partialRetraction = desired_value
+
+    def setAutoPurgeAfterShot(auto_purge_after_shot: bool):
+        desired_value = bool(auto_purge_after_shot)
+
+        if (
+            Machine.esp_info is not None
+            and Machine.esp_info.autoPurgeAfterShot == desired_value
+        ):
+            return
+
+        if (
+            Machine._connection is None
+            or Machine._connection.port is None
+            or Machine._stopESPcomm
+        ):
+            logger.warning(
+                "Cannot sync auto_purge_after_shot to ESP32 because serial connection "
+                "is not ready"
+            )
+            return
+
+        write_request = "nvs_request,write,"
+        payload = (
+            write_request
+            + esp_nvs_keys.auto_purge_after_shot.value
+            + ","
+            + ("true" if desired_value else "false")
+            + "\x03"
+        )
+        Machine.write(payload.encode("utf-8"))
+        logger.info("Synced auto_purge_after_shot to ESP32: " + f"requested={desired_value}")
+
+        if Machine.esp_info is not None:
+            Machine.esp_info.autoPurgeAfterShot = desired_value
 
     def _parseVersionString(version_str: str):
         release = None
@@ -834,7 +1031,5 @@ Build Date: {build_date}
                 "Local": modifier,
             }
         except Exception as e:
-            logger.warning(
-                "Failed parse firmware version:", exc_info=e, stack_info=True
-            )
+            logger.warning("Failed parse firmware version:", exc_info=e, stack_info=True)
             return None

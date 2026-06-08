@@ -1,5 +1,26 @@
 import json
-from .dictionaries import *
+from .dictionaries import (
+    algorithms_type,
+    controllers_type,
+    curve_interpolation,
+    directions,
+    messages,
+    reference_type,
+)
+from .enums import (
+    AlgorithmType,
+    ControllerType,
+    CurveInterpolationType,
+    DirectionType,
+    FlowAlgorithmType,
+    MessageType,
+    PowerAlgorithmType,
+    PressureAlgorithmType,
+    ReferenceType,
+    SpeedAlgorithmType,
+    TemperatureAlgorithmType,
+    WeightAlgorithmType,
+)
 
 
 class Controllers:
@@ -45,9 +66,7 @@ class CurveControllers(Controllers):
         if interpolation_kind not in curve_interpolation:
             raise ValueError("Invalid interpolation kind")
 
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
 
     def set_points(self, points: list):
         self.data["curve"]["points"].extend(points)
@@ -86,9 +105,7 @@ class PressureController(CurveControllers):
         self.data["kind"] = controllers_type[ControllerType.PRESSURE]
         self.data["algorithm"] = algorithms_type[AlgorithmType.PRESSURE][algorithm]
         self.data["curve"]["id"] = curve_id
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
         self.data["curve"]["points"] = points
         self.data["curve"]["reference"]["kind"] = reference_type[ReferenceType.CURVE][
             reference_kind
@@ -117,9 +134,7 @@ class FlowController(CurveControllers):
         self.data["kind"] = controllers_type[ControllerType.FLOW]
         self.data["algorithm"] = algorithms_type[AlgorithmType.FLOW][algorithm]
         self.data["curve"]["id"] = curve_id
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
         self.data["curve"]["points"] = points
         self.data["curve"]["reference"]["kind"] = reference_type[ReferenceType.CURVE][
             reference_kind
@@ -147,9 +162,7 @@ class TemperatureController(CurveControllers):
         self.data["kind"] = controllers_type[ControllerType.TEMPERATURE]
         self.data["algorithm"] = algorithms_type[AlgorithmType.TEMPERATURE][algorithm]
         self.data["curve"]["id"] = curve_id
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
         self.data["curve"]["points"] = points
         self.data["curve"]["reference"]["kind"] = reference_type[ReferenceType.CURVE][
             reference_kind
@@ -208,9 +221,7 @@ class PowerController(CurveControllers):
         self.data["kind"] = controllers_type[ControllerType.POWER]
         self.data["algorithm"] = algorithms_type[AlgorithmType.POWER][algorithm]
         self.data["curve"]["id"] = curve_id
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
         self.data["curve"]["points"] = points
         self.data["curve"]["reference"]["kind"] = reference_type[ReferenceType.CURVE][
             reference_kind
@@ -238,9 +249,7 @@ class WeightController(CurveControllers):
         self.data["kind"] = controllers_type[ControllerType.WEIGHT]
         self.data["algorithm"] = algorithms_type[AlgorithmType.WEIGHT][algorithm]
         self.data["curve"]["id"] = curve_id
-        self.data["curve"]["interpolation_kind"] = curve_interpolation[
-            interpolation_kind
-        ]
+        self.data["curve"]["interpolation_kind"] = curve_interpolation[interpolation_kind]
         self.data["curve"]["points"] = points
         self.data["curve"]["reference"]["kind"] = reference_type[ReferenceType.CURVE][
             reference_kind
@@ -306,9 +315,7 @@ class PositionReferenceController(ReferenceController):
     # This class is a controller that when called, the machine makes a reference in position
     def __init__(self, id: int = 0):
         super().__init__()
-        self.data["kind"] = reference_type[ReferenceType.CONTROL][
-            ReferenceType.POSITION
-        ]
+        self.data["kind"] = reference_type[ReferenceType.CONTROL][ReferenceType.POSITION]
         self.data["id"] = id
 
     def get_position_reference_id(self):
@@ -351,7 +358,7 @@ if __name__ == "__main__":
     # pressure_controller_1.set_reference_id(2)
     print(json.dumps(pressure_controller_1.get_controller(), indent=4))
 
-    #! The same process is repeated for the other controllers when the control accepts at least one parameter
+    # The same process is repeated for the other controllers when the control accepts at least one parameter
 
     flow_controller_1 = FlowController(
         FlowAlgorithmType.PID_V1,
@@ -384,9 +391,7 @@ if __name__ == "__main__":
     # temperature_controller_1.set_reference_id(6)
     print(json.dumps(temperature_controller_1.get_controller(), indent=4))
 
-    speed_controller_1 = SpeedController(
-        SpeedAlgorithmType.EASE_IN, 7, DirectionType.FORWARD
-    )
+    speed_controller_1 = SpeedController(SpeedAlgorithmType.EASE_IN, 7, DirectionType.FORWARD)
     # speed_controller_1.set_algorithm(SpeedAlgorithmType.EASE_IN)
     # speed_controller_1.set_speed(7)
     # speed_controller_1.set_direction(DirectionType.FORWARD)

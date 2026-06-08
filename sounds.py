@@ -1,7 +1,7 @@
 from enum import Enum, auto
 import os
 import json
-from play_sound import playsound
+from playsound3 import playsound
 import gpiod
 import subprocess
 
@@ -45,6 +45,7 @@ class SoundPlayer:
     DEFAULT_THEME_CONFIG = {}
 
     _audio_pin = None
+    _current_sound = None
 
     @staticmethod
     def init(emulation=False, play_startup_sound=True):
@@ -77,7 +78,7 @@ class SoundPlayer:
         )
 
         try:
-            subprocess.run(["pactl", "--", "set-sink-volume", "0", "70%"])
+            subprocess.run(["pactl", "--", "set-sink-volume", "0", "40%"])
         except Exception as e:
             logger.error(f"failed to set audio volume: {e}")
 
@@ -122,9 +123,7 @@ class SoundPlayer:
         :param theme_name: The name of the theme to set as the current theme.
         """
         if SoundPlayer.KNOWN_THEMES is None:
-            logger.warning(
-                "Manipulating theme before SoundPlayer was initialized. Ignoring."
-            )
+            logger.warning("Manipulating theme before SoundPlayer was initialized. Ignoring.")
             return False
 
         if theme_name in SoundPlayer.availableThemes() or theme_name is None:
@@ -172,16 +171,11 @@ class SoundPlayer:
             return True
 
         if SoundPlayer.KNOWN_THEMES is None:
-            logger.warning(
-                "Playing sound before SoundPlayer was initialized. Ignoring."
-            )
+            logger.warning("Playing sound before SoundPlayer was initialized. Ignoring.")
             return False
 
         # Just in case we have a stale mapping
-        if (
-            SoundPlayer.CURRENT_THEME_NAME
-            != MeticulousConfig[CONFIG_SYSTEM][SOUNDS_THEME]
-        ):
+        if SoundPlayer.CURRENT_THEME_NAME != MeticulousConfig[CONFIG_SYSTEM][SOUNDS_THEME]:
             SoundPlayer.set_theme(MeticulousConfig[CONFIG_SYSTEM][SOUNDS_THEME])
 
         if sound_name not in SoundPlayer.CURRENT_THEME_CONFIG:
@@ -206,7 +200,14 @@ class SoundPlayer:
             return False
 
         try:
-            playsound(file_path, block=False)
+            # Stop any currently playing sound before starting a new one
+            if SoundPlayer._current_sound is not None:
+                try:
+                    SoundPlayer._current_sound.stop()
+                except Exception:
+                    pass
+            # Play non-blocking to avoid stalling the serial loop and Tornado IO loop
+            SoundPlayer._current_sound = playsound(file_path, block=False)
         except Exception as e:
             logger.exception(f"Failed to play sound: {e}")
             return False

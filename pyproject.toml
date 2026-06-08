@@ -1,0 +1,64 @@
+[project]
+name = "meticulous-backend"
+version = "0.1.0"
+description = "Meticulous Espresso Machine Backend"
+requires-python = ">=3.11"
+dependencies = [
+    "bidict>=0.22.1",
+    "bless>=0.2.6",
+    "bleak<1.0.0",
+    "coloredlogs",
+    "datauri",
+    "cryptography>=46.0.6",
+    "ecdsa>=0.19.2",
+    "esptool==4.6.2",
+    "Pygments>=2.20.0",
+    "mergedeep>=1.3.4",
+    "netaddr>=0.9.0",
+    "nmcli",
+    "psutil",
+    "packaging==24.1",
+    "pyprctl",
+    "pydantic>=2.8.2",
+    "pyImprov>=0.2.0",
+    "playsound3",
+    "pypng>=0.20220715.0",
+    "PyQRCode>=1.2.1",
+    "pyserial>=3.5",
+    "python-engineio>=4.6.1",
+    "python-socketio>=5.8.0",
+    "python-xlib==0.33",
+    "pytz>=2024.1",
+    "sentry-sdk==2.22.0",
+    "SQLAlchemy==2.0.38",
+    "tornado>=6.4.2",
+    "zeroconf==0.145.1",
+    "zstandard>=0.23.0",
+    "jsonschema==4.23.0",
+    "dbus-next",
+    "pydbus==0.6.0",
+    "aiohttp>=3.11.11",
+    "attrs==25.1.0",
+    "alembic==1.14.1",
+    "uuid-utils>=0.16.0",
+]
+
+[dependency-groups]
+# Packages that require system C libraries (libparted, libgirepository, libcairo, etc.)
+# Only installable on the target machine or in the Docker build environment
+machine = [
+    "gpiod==1.5.4",
+    "pycairo",
+    "PyGObject>=3.42.0,<3.52",
+    "pyparted",
+]
+dev = [
+    "pre-commit>=4.3.0",
+    "flake8==7.2.0",
+    "black==26.3.1",
+    "pytest>=8.0.0",
+]
+
+[tool.black]
+line-length = 96
+target-version = ["py311"]

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import urllib.parse
+from dataclasses import dataclass
 from named_thread import NamedThread
 import time
 import uuid
@@ -17,28 +18,43 @@ from config import (
     MeticulousConfig,
     CONFIG_USER,
     CONFIG_PROFILES,
-    PROFILE_AUTO_PURGE,
-    PROFILE_AUTO_START,
     PROFILE_LAST,
     PROFILE_ORDER,
 )
 import asyncio
 from log import MeticulousLogger
 from machine import Machine
-from profile_converter.profile_converter import ComplexProfileConverter
 from profile_preprocessor import ProfilePreprocessor
+from api.alarms import AlarmManager, AlarmType
+from images.notificationImages.base64 import WARNING_TRIANGLE_IMAGE
+import math
 
 logger = MeticulousLogger.getLogger(__name__)
 
+
+@dataclass
+class ProfileHover:
+    id: str = ""
+    type: str = ""
+    from_: str = ""
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "type": self.type, "from": self.from_}
+
+    @staticmethod
+    def from_dict(data: dict) -> "ProfileHover":
+        return ProfileHover(
+            id=data.get("id", ""),
+            type=data.get("type", ""),
+            from_=data.get("from", ""),
+        )
+
+
 PROFILE_PATH = os.getenv("PROFILE_PATH", "/meticulous-user/profiles")
 IMAGES_PATH = os.getenv("IMAGES_PATH", "/meticulous-user/profile-images/")
-DEFAULT_IMAGES_PATH = os.getenv(
-    "DEFAULT_IMAGES", "/opt/meticulous-backend/images/default"
-)
+DEFAULT_IMAGES_PATH = os.getenv("DEFAULT_IMAGES", "/opt/meticulous-backend/images/default")
 
-DEFAULT_IMAGES_PATH_ACCENT_COLORS = os.path.join(
-    DEFAULT_IMAGES_PATH, "accent_colors.json"
-)
+DEFAULT_IMAGES_PATH_ACCENT_COLORS = os.path.join(DEFAULT_IMAGES_PATH, "accent_colors.json")
 
 DEFAULT_PROFILES_PATH = os.getenv(
     "DEFAULT_PROFILES", "/opt/meticulous-backend/default_profiles"
@@ -65,6 +81,7 @@ class ProfileManager:
     _thread: NamedThread = None
     _last_profile_changes = []
     _schema = None
+    _profile_hover: ProfileHover = ProfileHover()
 
     def init(sio: socketio.AsyncServer):
         ProfileManager._sio = sio
@@ -92,6 +109,16 @@ class ProfileManager:
         ProfileManager.refresh_default_profile_list()
         ProfileManager.refresh_profile_list()
         ProfileManager._delete_unused_images()
+
+        # Seed hover state from last loaded profile
+        last = ProfileManager.get_last_profile()
+        if last and "profile" in last:
+            profile = last["profile"]
+            ProfileManager._profile_hover = ProfileHover(
+                id=profile.get("id", ""),
+                type="focus",
+                from_="backend",
+            )
 
     def _register_profile_change(
         change: PROFILE_EVENT,
@@ -175,9 +202,7 @@ class ProfileManager:
                 file_content = uri.data
                 file_extension = uri.media_type.split("/")[-1]
 
-                if (
-                    len(file_content) > 10 * 1024 * 1024
-                ):  # size check, e.g., less than 10MB
+                if len(file_content) > 10 * 1024 * 1024:  # size check, e.g., less than 10MB
                     logger.warning("File size exceeds limit.")
                     raise Exception("Image file too large")
 
@@ -197,9 +222,7 @@ class ProfileManager:
                 )
                 pass
         elif not data["display"]["image"].startswith("/api/v1/profile/image"):
-            data["display"]["image"] = (
-                "/api/v1/profile/image/" + data["display"]["image"]
-            )
+            data["display"]["image"] = "/api/v1/profile/image/" + data["display"]["image"]
 
     def generate_ramdom_accent_color():
         color = random.randrange(0, 2**24)
@@ -218,9 +241,9 @@ class ProfileManager:
 
                 if base in ProfileManager._profile_default_images_accent_colors:
                     logger.info("No accent color found, using default one")
-                    predefined_color = (
-                        ProfileManager._profile_default_images_accent_colors[base]
-                    )
+                    predefined_color = ProfileManager._profile_default_images_accent_colors[
+                        base
+                    ]
                     data["display"]["accentColor"] = predefined_color
                     return
 
@@ -279,6 +302,18 @@ class ProfileManager:
 
         ProfileManager._emit_profile_event(change_type, data["id"], change_id)
 
+        # New profile is auto-selected by the dial — emit profileHover so clients update
+        if change_type == PROFILE_EVENT.CREATE:
+            ProfileManager._profile_hover = ProfileHover(
+                id=data["id"],
+                type="focus",
+                from_="dial",
+            )
+            asyncio.run_coroutine_threadsafe(
+                ProfileManager._async_emit_profile_hover(),
+                ProfileManager._loop,
+            )
+
         return {"profile": data, "change_id": change_id}
 
     def delete_profile(id: str, change_id: Optional[str] = None) -> Optional[dict]:
@@ -301,6 +336,12 @@ class ProfileManager:
 
         ProfileManager._delete_unused_images()
 
+        # If deleted profile was hovered, clear the stale hover state silently.
+        # Do not emit — the dial handles carousel position on deletion itself,
+        # and an empty profileHover payload would disrupt its focus state.
+        if ProfileManager._profile_hover.id == id:
+            ProfileManager._profile_hover = ProfileHover()
+
         return {"profile": profile, "change_id": change_id}
 
     def get_profile(id):
@@ -315,8 +356,12 @@ class ProfileManager:
         return profile
 
     def send_profile_to_esp32(data):
-        click_to_start = not MeticulousConfig[CONFIG_USER][PROFILE_AUTO_START]
-        click_to_purge = not MeticulousConfig[CONFIG_USER][PROFILE_AUTO_PURGE]
+        if (end_time := AlarmManager.is_alarm_set(AlarmType.MOTOR_STRESSED)) is not None:
+            AlarmManager._notify_user(
+                message=f"Brewing has been disabled because of a recent high strain on the motor, let it rest for {math.ceil((end_time - time.time())/60.0) if math.isfinite(end_time) else 10} more minutes",
+                image=WARNING_TRIANGLE_IMAGE,
+            )
+            return False
 
         if "id" not in data:
             data["id"] = str(uuid.uuid4())
@@ -339,39 +384,38 @@ class ProfileManager:
             )
             raise err
 
-        after_variables = time.time()
-
-        # Conver to nodeJSON
-        converter = ComplexProfileConverter(
-            click_to_start, click_to_purge, 1000, 7000, preprocessed_profile
-        )
-        profile = converter.get_profile()
         end = time.time()
 
-        time_str = "Preprocessing of the profile took "
-        full_time_ms = (end - start) * 1000
-        if full_time_ms > 10:
-            time_str += f"{int(full_time_ms)} ms"
+        preprocessing_time_ms = (end - start) * 1000
+        if preprocessing_time_ms > 10:
+            logger.info(
+                f"Preprocessing and variable expansion took {int(preprocessing_time_ms)} ms"
+            )
         else:
-            time_str += f"{int(full_time_ms*1000)} ns"
-
-        variable_time_ms = (end - after_variables) * 1000
-        time_str += " out of that variables were processed in "
-        if variable_time_ms > 10:
-            time_str += f"{int(variable_time_ms)} ms"
-        else:
-            time_str += f"{int(variable_time_ms*1000)} ns"
-        logger.info(time_str)
+            logger.info(
+                f"Preprocessing and variable expansion took {int(preprocessing_time_ms*1000)} ns"
+            )
 
         logger.info(
-            f"node JSON streamed to ESP32: click_to_start={click_to_start} click_to_purge={click_to_purge} data={json.dumps(profile)}"
+            f"simplified profile streamed to ESP32: data={json.dumps(preprocessed_profile)}"
         )
 
-        Machine.send_json_with_hash(profile)
+        Machine.send_json_with_hash(preprocessed_profile)
 
         ProfileManager._set_last_profile(data)
 
         ProfileManager._emit_profile_event(PROFILE_EVENT.LOAD, data["id"])
+
+        # Loading auto-selects the profile — emit profileHover so clients update
+        ProfileManager._profile_hover = ProfileHover(
+            id=data["id"],
+            type="focus",
+            from_="dial",
+        )
+        asyncio.run_coroutine_threadsafe(
+            ProfileManager._async_emit_profile_hover(),
+            ProfileManager._loop,
+        )
 
         return data
 
@@ -420,9 +464,7 @@ class ProfileManager:
 
                 errors = ProfileManager.validate_profile(profile)
                 if errors is not None:
-                    logger.warning(
-                        f"Profile on disk failed to be loaded: {errors.message}"
-                    )
+                    logger.warning(f"Profile on disk failed to be loaded: {errors.message}")
                     continue
 
                 if profile_changed:
@@ -477,9 +519,7 @@ class ProfileManager:
                 try:
                     profile = json.load(f)
                 except json.decoder.JSONDecodeError as error:
-                    logger.warning(
-                        f"Could not decode default profile {f.name}: {error}"
-                    )
+                    logger.warning(f"Could not decode default profile {f.name}: {error}")
                     continue
                 logger.info("Found default profile: " + filename)
                 ProfileManager._default_profiles.append(profile)
@@ -500,9 +540,7 @@ class ProfileManager:
                     try:
                         profile = json.load(f)
                     except json.decoder.JSONDecodeError as error:
-                        logger.warning(
-                            f"Could not decode community profile {f.name}: {error}"
-                        )
+                        logger.warning(f"Could not decode community profile {f.name}: {error}")
                         continue
                     logger.info("Found community profile: " + filename)
                     ProfileManager._community_profiles.append(profile)
@@ -535,9 +573,7 @@ class ProfileManager:
                     accent_colors = json.load(f)
                     ProfileManager._profile_default_images_accent_colors = accent_colors
                 except json.decoder.JSONDecodeError as error:
-                    logger.warning(
-                        f"Could not decode default accent colors {f.name}: {error}"
-                    )
+                    logger.warning(f"Could not decode default accent colors {f.name}: {error}")
 
         for filename in os.listdir(DEFAULT_IMAGES_PATH):
             file_path = os.path.join(DEFAULT_IMAGES_PATH, filename)
@@ -557,9 +593,7 @@ class ProfileManager:
                 dst_path = os.path.join(IMAGES_PATH, new_filename)
                 shutil.copy2(file_path, dst_path)
                 ProfileManager._profile_default_images.append(new_filename)
-        logger.info(
-            f"Found {len(ProfileManager._profile_default_images)} default images"
-        )
+        logger.info(f"Found {len(ProfileManager._profile_default_images)} default images")
 
         ProfileManager._known_images = os.listdir(IMAGES_PATH)
 
@@ -611,6 +645,28 @@ class ProfileManager:
 
     def get_last_profile():
         return MeticulousConfig[CONFIG_PROFILES][PROFILE_LAST]
+
+    async def handle_profile_hover(data, sid=None) -> None:
+        ProfileManager._profile_hover = ProfileHover.from_dict(data)
+        logger.info(f"Profile hover updated: {ProfileManager._profile_hover.to_dict()}")
+        await ProfileManager._async_emit_profile_hover(skip_sid=sid)
+
+    async def _async_emit_profile_hover(skip_sid=None, to=None) -> None:
+        if not ProfileManager._sio:
+            return
+        payload = ProfileManager._profile_hover.to_dict()
+        if to:
+            # Emit as "backend" on connect — dial will process and jump
+            # to last loaded profile (visual confirmation backend is up)
+            backend_payload = {**payload, "from": "backend"}
+            await ProfileManager._sio.emit("profileHover", backend_payload, to=to)
+        elif skip_sid:
+            await ProfileManager._sio.emit("profileHover", payload, skip_sid=skip_sid)
+        else:
+            await ProfileManager._sio.emit("profileHover", payload)
+
+    def get_profile_hover() -> dict:
+        return ProfileManager._profile_hover.to_dict()
 
     def _get_md5_hash(image_path):
         hash_md5 = hashlib.md5()

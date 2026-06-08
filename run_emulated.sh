@@ -5,6 +5,7 @@ export LOG_PATH=./logs
 export PROFILE_PATH=./profiles
 export HISTORY_PATH=./history
 export DEBUG_HISTORY_PATH=./history/debug
+export MOTOR_ENERGY_PATH=./history/energy
 export UPDATE_PATH=/tmp/firmware
 export PORT=8080
 export ZEROCONF_PORT=8080
@@ -15,24 +16,15 @@ export IMAGES_PATH=./images/profile-images
 export DEFAULT_PROFILES=./default_profiles
 export TIMEZONE_JSON_FILE_PATH=./UI_timezones.json
 export USER_DB_MIGRATION_DIR=./db-migrations
+export ALARMS_PATH=./alarms
+export REPORTS_DIR=./reports
 
-if [[ -z "${MET_VENV}" ]]; then
-    MET_VENV=".venv"
-fi
-
-PYTHON=python3
-if [[ -e "${MET_VENV}" ]]; then
-	PYTHON="${MET_VENV}/bin/python3"
-fi
+uv sync --group dev --group machine
 
 if [[ "$@" == *"--memory"* ]]; then
-    if [ $PYTHON -m memray ]; then
-        $PYTHON -m pip install memray
-    fi
-    profiling_file="memory_profiling_$(date -Iseconds).bin"
-    $PYTHON -m memray run -o ${profiling_file} back.py
-    $PYTHON -m memray flamegraph ${profiling_file}
-    $PYTHON -m memray summary ${profiling_file}
+    uv run --with memray python3 -m memray run -o "memory_profiling_$(date -Iseconds).bin" back.py
+    uv run --with memray python3 -m memray flamegraph "memory_profiling_$(date -Iseconds).bin"
+    uv run --with memray python3 -m memray summary "memory_profiling_$(date -Iseconds).bin"
 else
-    $PYTHON back.py
+    uv run python3 back.py
 fi

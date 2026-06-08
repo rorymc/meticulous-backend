@@ -61,9 +61,7 @@ class SaveProfileHandler(BaseHandler):
             return
         except Exception as e:
             self.set_status(400)
-            self.write(
-                {"status": "error", "error": "failed to save profile", "cause": f"{e}"}
-            )
+            self.write({"status": "error", "error": "failed to save profile", "cause": f"{e}"})
             logger.warning("Failed to save profile:", exc_info=e, stack_info=True)
 
 
@@ -75,9 +73,7 @@ class LoadProfileHandler(BaseHandler):
             self.write({"status": "error", "error": "machine is busy"})
             return
         try:
-            data = await loop.run_in_executor(
-                None, ProfileManager.get_profile, profile_id
-            )
+            data = await loop.run_in_executor(None, ProfileManager.get_profile, profile_id)
             if data:
                 try:
                     profile = await loop.run_in_executor(
@@ -96,15 +92,11 @@ class LoadProfileHandler(BaseHandler):
                     return
             else:
                 self.set_status(404)
-                self.write(
-                    {"status": "error", "error": "profile not found", "id": profile_id}
-                )
+                self.write({"status": "error", "error": "profile not found", "id": profile_id})
         except Exception as e:
             self.set_status(400)
             self.write({"status": "error", "error": f"failed to load profile {e}"})
-            logger.warning(
-                "Failed to execute profile in place:", exc_info=e, stack_info=True
-            )
+            logger.warning("Failed to execute profile in place:", exc_info=e, stack_info=True)
 
     async def post(self):
         if not Machine.is_idle:
@@ -129,6 +121,10 @@ class LoadProfileHandler(BaseHandler):
                 profile = await loop.run_in_executor(
                     None, ProfileManager.send_profile_to_esp32, data
                 )
+                if not profile:
+                    self.set_status(403)
+                    self.write({"status": "error", "error": "high strain on motor"})
+                    return
             except jsonschema.exceptions.ValidationError as err:
                 errors = {
                     "status": "error",
@@ -153,9 +149,7 @@ class LoadProfileHandler(BaseHandler):
         except Exception as e:
             self.set_status(400)
             self.write({"status": "error", "error": f"failed to load profile {e}"})
-            logger.warning(
-                "Failed to execute profile in place:", exc_info=e, stack_info=True
-            )
+            logger.warning("Failed to execute profile in place:", exc_info=e, stack_info=True)
 
 
 class LegacyProfileHandler(BaseHandler):
@@ -190,9 +184,7 @@ class LegacyProfileHandler(BaseHandler):
         except Exception as e:
             self.set_status(400)
             self.write({"status": "error", "error": f"failed to load profile {e}"})
-            logger.warning(
-                "Failed to execute profile in place:", exc_info=e, stack_info=True
-            )
+            logger.warning("Failed to execute profile in place:", exc_info=e, stack_info=True)
 
 
 class GetProfileHandler(BaseHandler):
@@ -204,9 +196,7 @@ class GetProfileHandler(BaseHandler):
             logger.info(data)
         else:
             self.set_status(404)
-            self.write(
-                {"status": "error", "error": "profile not found", "id": profile_id}
-            )
+            self.write({"status": "error", "error": "profile not found", "id": profile_id})
 
 
 class DeleteProfileHandler(BaseHandler):
@@ -222,9 +212,7 @@ class DeleteProfileHandler(BaseHandler):
             self.write(data)
         else:
             self.set_status(404)
-            self.write(
-                {"status": "error", "error": "profile not found", "id": profile_id}
-            )
+            self.write({"status": "error", "error": "profile not found", "id": profile_id})
 
 
 class ChangesHandler(BaseHandler):
@@ -246,15 +234,22 @@ class LastProfileHandler(BaseHandler):
             return
 
         if last_profile["load_time"] is not None:
-            last_modified = datetime.fromtimestamp(
-                last_profile["load_time"], tz=timezone.utc
-            )
+            last_modified = datetime.fromtimestamp(last_profile["load_time"], tz=timezone.utc)
             last_modified.timetz
             self.set_header(
                 "Last-Modified", last_modified.strftime("%a, %d %b %Y %H:%M:%S GMT")
             )
 
         self.write(json.dumps(last_profile))
+
+
+class SelectedProfileHandler(BaseHandler):
+    def get(self):
+        hover = ProfileManager.get_profile_hover()
+        if not hover.get("id"):
+            self.set_status(204)
+            return
+        self.write(json.dumps(hover))
 
 
 class ListImagesHandler(BaseHandler):
@@ -273,13 +268,10 @@ API.register_handler(
     tornado.web.StaticFileHandler,
     **{"path": IMAGES_PATH},
 ),
-API.register_handler(
-    APIVersion.V1, r"/profile/load/([0-9a-fA-F-]+)", LoadProfileHandler
-),
+API.register_handler(APIVersion.V1, r"/profile/load/([0-9a-fA-F-]+)", LoadProfileHandler),
 API.register_handler(APIVersion.V1, r"/profile/get/([0-9a-fA-F-]+)", GetProfileHandler),
-API.register_handler(
-    APIVersion.V1, r"/profile/delete/([0-9a-fA-F-]+)", DeleteProfileHandler
-),
+API.register_handler(APIVersion.V1, r"/profile/delete/([0-9a-fA-F-]+)", DeleteProfileHandler),
 API.register_handler(APIVersion.V1, r"/profile/changes", ChangesHandler),
 API.register_handler(APIVersion.V1, r"/profile/last", LastProfileHandler),
+API.register_handler(APIVersion.V1, r"/profile/selected", SelectedProfileHandler),
 API.register_handler(APIVersion.V1, r"/profile/legacy", LegacyProfileHandler),

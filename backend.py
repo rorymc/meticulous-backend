@@ -48,7 +48,10 @@ from api.machine import UpdateOSStatus
 from timezone_manager import TimezoneManager
 
 from ssh_manager import SSHManager
+from system_services import SystemServices
 from telemetry_service import TelemetryService
+
+from api.alarms import AlarmManager
 
 logger = MeticulousLogger.getLogger(__name__)
 
@@ -68,8 +71,9 @@ UpdateOSStatus.setSio(sio)
 
 
 @sio.event
-def connect(sid, environ):
+async def connect(sid, environ):
     logger.info("connect %s", sid)
+    await ProfileManager._async_emit_profile_hover(to=sid)
 
 
 @sio.event
@@ -103,7 +107,7 @@ def notification(sid, noti_json):
 @sio.on("profileHover")
 async def forwardProfileHover(sid, data):
     logger.info(f"Hovering Profile {json.dumps(data, indent=1, sort_keys=False)}")
-    await sio.emit("profileHover", data, skip_sid=sid)
+    await ProfileManager.handle_profile_hover(data, sid=sid)
 
 
 @sio.on("calibrate")  # Use when calibration it is implemented
@@ -205,9 +209,7 @@ async def send_data():  # noqa: C901
             Machine.action(_input)
 
         elif _input == "test":
-            previous_sensor_status = MeticulousConfig[CONFIG_LOGGING][
-                LOGGING_SENSOR_MESSAGES
-            ]
+            previous_sensor_status = MeticulousConfig[CONFIG_LOGGING][LOGGING_SENSOR_MESSAGES]
             MeticulousConfig[CONFIG_LOGGING][LOGGING_SENSOR_MESSAGES] = True
             for i in range(0, 10):
                 _input = "action," + "purge" + "\x03"
@@ -220,9 +222,7 @@ async def send_data():  # noqa: C901
                 contador = "Numero de prueba: " + str(i + 1)
                 logger.info(_input)
                 logger.info(contador)
-            MeticulousConfig[CONFIG_LOGGING][
-                LOGGING_SENSOR_MESSAGES
-            ] = previous_sensor_status
+            MeticulousConfig[CONFIG_LOGGING][LOGGING_SENSOR_MESSAGES] = previous_sensor_status
 
         elif _input[:11] == "calibration":
             _input = "action," + _input + "\x03"
@@ -285,14 +285,14 @@ def main():
         sentry_sdk.set_tag(
             "machine", "".join(MeticulousConfig[CONFIG_SYSTEM][DEVICE_IDENTIFIER])
         )
-        sentry_sdk.set_tag(
-            "serial", MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER]
-        )
+        sentry_sdk.set_tag("serial", MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER])
     except Exception as e:
         logger.error(f"Failed to set sentry context: {e}")
 
+    AlarmManager.init()
     Machine.init(sio)
     SSHManager.init()
+    SystemServices.init()
 
     USBManager.init()
     DBusMonitor.enableUSBTest()

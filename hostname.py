@@ -1,7 +1,7 @@
 import subprocess
 import random
 
-from config import CONFIG_SYSTEM, MeticulousConfig, DEVICE_IDENTIFIER
+from config import CONFIG_SYSTEM, MeticulousConfig, DEVICE_IDENTIFIER, MACHINE_SERIAL_NUMBER
 from log import MeticulousLogger
 
 logger = MeticulousLogger.getLogger(__name__)
@@ -23,7 +23,7 @@ class HostnameManager:
         if len(MeticulousConfig[CONFIG_SYSTEM][DEVICE_IDENTIFIER]) == 2:
             return
 
-        (adjective, noun) = HostnameManager._generateRandomIdentifierComponents()
+        adjective, noun = HostnameManager._generateRandomIdentifierComponents()
         logger.info("Created new device identifier pair:")
         MeticulousConfig[CONFIG_SYSTEM][DEVICE_IDENTIFIER] = [adjective, noun]
         MeticulousConfig.save()
@@ -50,7 +50,7 @@ class HostnameManager:
         ident = HostnameManager.getMachineIdentifierCamelCase()
         if ident is None:
             ident = "Espresso"
-        return f"meticulous{ident}"
+        return f"meticulous{ident}-{MeticulousConfig[CONFIG_SYSTEM][MACHINE_SERIAL_NUMBER]}"
 
     def setHostname(new_hostname):
         try:

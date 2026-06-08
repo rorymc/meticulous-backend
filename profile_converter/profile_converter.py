@@ -1,11 +1,12 @@
 import json
-from .profile_json import *  # noqa: F401, F403
+from .profile_json import Profile  # noqa: F401
 from .simplified_json import SimplifiedJson
 from config import (
     MeticulousConfig,
     CONFIG_USER,
     MACHINE_ALLOW_STAGE_SKIPPING,
     PROFILE_PARTIAL_RETRACTION,
+    MAX_PISTON_POSITION,
 )
 
 
@@ -28,7 +29,7 @@ class ComplexProfileConverter:
         self.temperature = self.complex.get_temperature()
         # Use this value to prevent overshooting with a global offset
         self.offset_temperature = 2
-        self.max_piston_position = 75
+        self.max_piston_position = MAX_PISTON_POSITION
 
     def head_template(self):
         no_skipping = not MeticulousConfig[CONFIG_USER][MACHINE_ALLOW_STAGE_SKIPPING]
@@ -1006,9 +1007,7 @@ class ComplexProfileConverter:
             },
             {
                 "name": "END_STAGE",
-                "nodes": [
-                    {"id": -2, "controllers": [{"kind": "end_profile"}], "triggers": []}
-                ],
+                "nodes": [{"id": -2, "controllers": [{"kind": "end_profile"}], "triggers": []}],
             },
         ]
         return self.stages_tail
@@ -1022,9 +1021,7 @@ class ComplexProfileConverter:
             self.head_template() + self.complex_stages() + self.tail_template()
         )
         self.name_profile = (
-            self.complex.get_name()
-            if self.complex.get_name() is not None
-            else "Profile"
+            self.complex.get_name() if self.complex.get_name() is not None else "Profile"
         )
 
         self.profile_complex = {
@@ -1036,7 +1033,6 @@ class ComplexProfileConverter:
 
 
 if __name__ == "__main__":
-
     file_path = "simplified_json_example.json"
     with open(file_path, "r") as file:
         data = json.load(file)

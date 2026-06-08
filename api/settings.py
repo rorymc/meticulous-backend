@@ -11,12 +11,15 @@ from config import (
     TIME_ZONE,
     AUTOMATIC_TIMEZONE_SYNC,
     SSH_ENABLED,
+    TELEMETRY_SERVICE_ENABLED,
     PROFILE_ORDER,
+    PROFILE_AUTO_PURGE,
     PROFILE_PARTIAL_RETRACTION,
 )
 
 from heater_actuator import HeaterActuator
 from ssh_manager import SSHManager
+from system_services import SystemServices
 from profiles import ProfileManager
 
 from .base_handler import BaseHandler
@@ -99,9 +102,7 @@ class SettingsHandler(BaseHandler):
             settings = json.loads(self.request.body)
         except json.decoder.JSONDecodeError as e:
             self.set_status(403)
-            self.write(
-                {"status": "error", "error": "invalid json", "json_error": f"{e}"}
-            )
+            self.write({"status": "error", "error": "invalid json", "json_error": f"{e}"})
             return
 
         workConfig = copy.deepcopy(MeticulousConfig[CONFIG_USER])
@@ -110,9 +111,7 @@ class SettingsHandler(BaseHandler):
             for setting_target in settings:
                 value = settings.get(setting_target)
 
-                if setting_target == PROFILE_PARTIAL_RETRACTION and isinstance(
-                    value, int
-                ):
+                if setting_target == PROFILE_PARTIAL_RETRACTION and isinstance(value, int):
                     value = float(value)
 
                 self.validate_setting(setting_target, value)
@@ -140,6 +139,29 @@ class SettingsHandler(BaseHandler):
                             }
                         )
 
+                # Handle Telemetry Service (fluent-bit) settings
+                if setting_target == TELEMETRY_SERVICE_ENABLED:
+                    try:
+                        if not SystemServices.set_service_state("fluent-bit.service", value):
+                            self.set_status(500)
+                            self.write(
+                                {
+                                    "status": "error",
+                                    "setting": TELEMETRY_SERVICE_ENABLED,
+                                    "details": "Failed to update fluent-bit service state",
+                                }
+                            )
+                    except Exception as e:
+                        logger.error(f"Error managing fluent-bit service: {e}")
+                        self.set_status(500)
+                        self.write(
+                            {
+                                "status": "error",
+                                "setting": TELEMETRY_SERVICE_ENABLED,
+                                "details": "Internal server error",
+                            }
+                        )
+
                 if setting_target == TIMEZONE_SYNC:
                     new_tz = await self.update_timezone_sync(value)
                     if new_tz is not None:
@@ -160,6 +182,12 @@ class SettingsHandler(BaseHandler):
 
                 if setting_target == PROFILE_ORDER:
                     ProfileManager.on_profile_order_changed()
+
+                if setting_target == PROFILE_PARTIAL_RETRACTION:
+                    Machine.setPartialRetraction(value)
+
+                if setting_target == PROFILE_AUTO_PURGE:
+                    Machine.setAutoPurgeAfterShot(value)
 
                 # If we made it here without exception we can update the setting
                 workConfig[setting_target] = value
@@ -213,8 +241,7 @@ class TimezoneUIHandler(BaseHandler):
                 cities_in_country: dict = self.__timezone_map.get(conditional_filter)
                 if cities_in_country is not None:
                     return_array = [
-                        {city: cities_in_country.get(city)}
-                        for city in cities_in_country.keys()
+                        {city: cities_in_country.get(city)} for city in cities_in_country.keys()
                     ]
                 else:
                     error = "invalid country requested"
@@ -265,9 +292,7 @@ class ManufacturingSettingsHandler(BaseHandler):
             config = json.loads(self.request.body)
         except json.decoder.JSONDecodeError as e:
             self.set_status(403)
-            self.write(
-                {"status": "error", "error": "invalid json", "json_error": f"{e}"}
-            )
+            self.write({"status": "error", "error": "invalid json", "json_error": f"{e}"})
             return
 
         workConfig = copy.deepcopy(MeticulousConfig[CONFIG_MANUFACTURING])

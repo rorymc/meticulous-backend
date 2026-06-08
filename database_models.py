@@ -8,8 +8,8 @@ from sqlalchemy import (
     JSON,
     ForeignKey,
     Float,
+    Boolean,
 )
-
 
 metadata = MetaData(
     naming_convention={
@@ -57,12 +57,8 @@ shot_annotation = Table(
     "shot_annotation",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column(
-        "history_id", Integer, ForeignKey("history.id"), nullable=False, unique=True
-    ),
-    Column(
-        "history_uuid", Text, ForeignKey("history.uuid"), nullable=False, unique=True
-    ),
+    Column("history_id", Integer, ForeignKey("history.id"), nullable=False, unique=True),
+    Column("history_uuid", Text, ForeignKey("history.uuid"), nullable=False, unique=True),
 )
 
 shot_rating = Table(
@@ -77,6 +73,26 @@ shot_rating = Table(
         unique=True,
     ),
     Column("basic", Text, nullable=True),  # "like", "dislike", o null
+)
+
+bug_reports = Table(
+    "bug_reports",
+    metadata,
+    Column("localID", Text, primary_key=True, nullable=False),
+    Column("eventID", Text, nullable=True),
+    Column("baseEventID", Text, nullable=True),
+    Column("issueTime", Integer, nullable=False),
+    Column("creationTime", Integer, nullable=False),
+    Column("submissionTime", Integer, nullable=True),
+    Column("description", Text, nullable=True),
+    Column("multimedia", Integer, nullable=True),
+    Column("machineID", Text, nullable=True),
+    Column("logFiles", Text, nullable=True),
+    Column("machineInfo", Boolean, nullable=True),
+    Column("machineLogs", Boolean, nullable=True),
+    Column("machineStatus", Boolean, nullable=True),
+    Column("status", Text, nullable=False),
+    Column("ticketNumber", Integer, nullable=True),
 )
 
 # FTS structure is defined here for reference

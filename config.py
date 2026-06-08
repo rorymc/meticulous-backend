@@ -19,6 +19,14 @@ _config_logger = MeticulousLogger.getLogger(__name__)
 
 CONFIG_PATH = os.getenv("CONFIG_PATH", "/meticulous-user/config")
 
+# History and database paths
+HISTORY_PATH = os.getenv("HISTORY_PATH", "/meticulous-user/history")
+DATABASE_FILE = "history.sqlite"
+ABSOLUTE_DATABASE_FILE = Path(HISTORY_PATH).joinpath(DATABASE_FILE).resolve()
+DATABASE_URL = f"sqlite:///{ABSOLUTE_DATABASE_FILE}"
+SHOT_PATH = Path(HISTORY_PATH).joinpath("shots")
+DEBUG_HISTORY_PATH = os.getenv("DEBUG_HISTORY_PATH", "/meticulous-user/history/debug")
+
 # Config Compontents
 CONFIG_LOGGING = "logging"
 CONFIG_SYSTEM = "system"
@@ -47,6 +55,9 @@ DEVICE_DEFAULT_IDENTIFIER = []
 
 MACHINE_SERIAL_NUMBER = "serial"
 MACHINE_DEFAULT_SERIAL_NUMBER = None
+
+# Piston configuration
+MAX_PISTON_POSITION = 75  # Maximum piston travel in mm
 
 MACHINE_BATCH_NUMBER = "batch_number"
 MACHINE_DEFAULT_BATCH_NUMBER = None
@@ -87,6 +98,10 @@ SOUNDS_DEFAULT_THEME = "default"
 # SSH configuration
 SSH_ENABLED = "ssh_enabled"
 SSH_DEFAULT_ENABLED = True
+
+# Telemetry Service (fluent-bit) configuration
+TELEMETRY_SERVICE_ENABLED = "telemetry_service_enabled"
+TELEMETRY_SERVICE_DEFAULT_ENABLED = True
 
 # Firmware pinning
 DISALLOW_FIRMWARE_FLASHING = "disallow_firmware_flashing"
@@ -140,6 +155,9 @@ REVERSE_SCROLLING_DEFAULT = {
 
 HOSTNAME_OVERRIDE = "hostname_override"
 HOSTNAME_OVERRIDE_DEFAULT = None
+
+CLOCK_FORMAT_24_HOUR = "clock_format_24_hour"
+CLOCK_FORMAT_24_HOUR_DEFAULT = True
 
 
 class USB_MODES(Enum):
@@ -223,8 +241,10 @@ DefaultConfiguration_V1 = {
         TIME_ZONE: DEFAULT_TIME_ZONE,
         MACHINE_DEBUG_SENDING: MACHINE_DEBUG_SENDING_DEFAULT,
         SSH_ENABLED: SSH_DEFAULT_ENABLED,
+        TELEMETRY_SERVICE_ENABLED: TELEMETRY_SERVICE_DEFAULT_ENABLED,
         PROFILE_ORDER: PROFILE_ORDER_DEFAULT,
         HOSTNAME_OVERRIDE: HOSTNAME_OVERRIDE_DEFAULT,
+        CLOCK_FORMAT_24_HOUR: CLOCK_FORMAT_24_HOUR_DEFAULT,
     },
     CONFIG_WIFI: {
         WIFI_MODE: WIFI_MODE_AP,
@@ -310,16 +330,12 @@ class MeticulousConfigDict(dict):
                     disk_config = yaml.safe_load(f)
                     disk_version = disk_config.get("version")
                     if disk_version is not None and disk_version > self["version"]:
-                        _config_logger.warning(
-                            "Config on disk is newer than this software"
-                        )
+                        _config_logger.warning("Config on disk is newer than this software")
                     merge(self, disk_config)
                     # migrate partial_retraction config data from int to float
                     retraction = self[CONFIG_USER][PROFILE_PARTIAL_RETRACTION]
                     if isinstance(retraction, int):
-                        self[CONFIG_USER][PROFILE_PARTIAL_RETRACTION] = float(
-                            retraction
-                        )
+                        self[CONFIG_USER][PROFILE_PARTIAL_RETRACTION] = float(retraction)
                     _config_logger.info("Successfully loaded config from disk")
                     self.__configError = False
                 except Exception as e:

@@ -23,8 +23,10 @@ class BaseHandler(tornado.web.RequestHandler):
         self.set_header("Access-Control-Expose-Headers", "*")
 
         self.set_header("Content-type", "application/json")
-        self.set_header("Access-Control-Allow-Methods", "GET,POST,OPTIONS,DELETE")
-        self.set_header("Access-Control-Allow-Headers", "content-type")
+        self.set_header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS,DELETE")
+        self.set_header(
+            "Access-Control-Allow-Headers", "content-type, authorization, x-authorized"
+        )
         # We hate caching!
         self.set_header("Cache-Control", "no-cache")
         self.set_header("Pragma", "no-cache")
@@ -56,23 +58,14 @@ class BaseHandler(tornado.web.RequestHandler):
 
         # TODO test me well!
         if (
-            len(
-                [
-                    network
-                    for network in allowed_networks
-                    if self.request.remote_ip in network
-                ]
-            )
+            len([network for network in allowed_networks if self.request.remote_ip in network])
             > 0
         ):
             return
 
         # Validate the X-Authorized header
         x_authorized = self.request.headers.get("X-Authorized")
-        if (
-            not x_authorized
-            or x_authorized != MeticulousConfig[CONFIG_SYSTEM][HTTP_AUTH_KEY]
-        ):
+        if not x_authorized or x_authorized != MeticulousConfig[CONFIG_SYSTEM][HTTP_AUTH_KEY]:
             self.set_status(401)
             self.finish("Unauthorized: Missing X-Authorized header")
             return
@@ -83,15 +76,18 @@ class LocalAccessHandler(BaseHandler):
 
     def prepare(self):
         super().prepare()
-        remote_ip = self.request.remote_ip
+        remote_ip = self.request.headers.get("X-Real-IP")
         request_host = self.request.host.split(":")[0]
-        if remote_ip not in ("127.0.0.1", "::1", "localhost") and request_host not in (
-            "localhost",
-            "127.0.0.1",
-        ):
-            logger.warning(
-                f"Unauthorized access to the password endpoint from {remote_ip}"
+        if (
+            remote_ip
+            and remote_ip not in ("127.0.0.1", "::1", "localhost")
+            and request_host
+            not in (
+                "localhost",
+                "127.0.0.1",
             )
+        ):
+            logger.warning(f"Unauthorized access to {self.request.uri} from {remote_ip}")
             self.set_status(403)
             self.write(
                 {

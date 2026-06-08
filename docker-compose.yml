@@ -9,6 +9,7 @@ services:
     expose:
       - 8080
     user: "${USER_ID:-root}:${GROUP_ID:-0}"
+    command: ["/bin/bash", "/app/start_container.sh"]
     environment:
       - BACKEND=emulation
       - EMULATION_SPEED=100
@@ -23,10 +24,20 @@ services:
       - DEFAULT_IMAGES=/app/images/default
       - IMAGES_PATH=/app/images/profile-images
       - DEFAULT_PROFILES=/app/default_profiles
+      - REPORTS_DIR=/app/reports
     volumes:
+      - .:/app
       - ./config:/app/config
       - ./logs:/app/logs
       - ./profiles:/app/profiles
       - ./history:/app/history
       - ./images:/app/images
       - ./default_profiles:/app/default_profiles
+      - ./reports:/app/reports
+      - /tmp/met_image-build-channel:/opt/image-build-channel
+    logging:
+      driver: "local"
+      options:
+        max-size: "150m"     # Max size of a single log file before it rotates
+        max-file: "3"       # Maximum number of rotated files to keep
+        compress: "true"
