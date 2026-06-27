@@ -34,6 +34,7 @@ DEBUG_HISTORY_ROOT = Path(DEBUG_HISTORY_PATH)
 WATCHER_LOGS_URL = os.getenv("WATCHER_LOGS_URL", "http://localhost/health/logs?filter=*")
 WATCHER_STATUS_URL = os.getenv("WATCHER_STATUS_URL", "http://localhost/health/status")
 REPORT_INFO_NAME = "report_info.json"
+STATS_INFO_NAME = "statistics.json"
 REPORT_LOG_NAME = "logs_while_reporting.txt"
 MACHINE_INFO_NAME = "machine_info.json"
 MACHINE_LOGS_NAME = "machine_logs.txt"
@@ -247,6 +248,12 @@ def _read_draft_report_info(draft_dir: Path) -> dict[str, Any]:
 def _write_draft_report_info(draft_dir: Path, report_info: dict[str, Any]):
     draft_dir.joinpath(REPORT_INFO_NAME).write_text(
         json.dumps(report_info, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _write_draft_machine_stats(draft_dir: Path, statistics: dict[str, Any]):
+    draft_dir.joinpath(STATS_INFO_NAME).write_text(
+        json.dumps(statistics, ensure_ascii=False), encoding="utf-8"
     )
 
 
@@ -818,11 +825,13 @@ class ReportsCreateHandler(BaseHandler):
         draft_dir = _draft_path(local_id)
         try:
             fetched = await _fetch_report_files(draft_dir)
+            db_statistics = ShotDataBase.statistics()
             attachments = {
                 "debugFiles": {"automatic": fetched.automatic_debug_files},
                 "machineInfo": fetched.machine_info,
                 "machineLogs": fetched.machine_logs,
                 "machineStatus": fetched.machine_status,
+                "DBStatistics": db_statistics,
             }
             report_info = {
                 "description": None,
@@ -836,6 +845,7 @@ class ReportsCreateHandler(BaseHandler):
                 "localID": local_id,
             }
             _write_draft_report_info(draft_dir, report_info)
+            _write_draft_machine_stats(draft_dir, db_statistics)
             _insert_report(report_info)
             self.write({"localID": local_id, "machineID": report_info["machineID"]})
         except Exception as exc:
